@@ -1,0 +1,12 @@
+## Interface: 16001
+## Title: WoW Pong
+## Notes: 1v1 click-to-move Pong with spectators. (/pong)
+## Author: Joe Greive
+## Version: @project-version@
+## SavedVariables: WoWPongDB
+
+Core.lua
+Sim.lua
+Bot.lua
+Game.lua
+UI.lua
