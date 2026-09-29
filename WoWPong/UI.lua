@@ -168,9 +168,16 @@ local function buildLobby(frame)
     ui.openBtn:SetPoint("TOPRIGHT", lobby, "TOPRIGHT", -6, -5)
     ui.statsBtn = newButton(lobby, "Stats", 60, function()
         ui.showingStats = not ui.showingStats
+        ui.showingLedger = false
         ui.lobbyAt = nil
     end)
     ui.statsBtn:SetPoint("RIGHT", ui.openBtn, "LEFT", -6, 0)
+    ui.ledgerBtn = newButton(lobby, "Ledger", 64, function()
+        ui.showingLedger = not ui.showingLedger
+        ui.showingStats = false
+        ui.lobbyAt = nil
+    end)
+    ui.ledgerBtn:SetPoint("RIGHT", ui.statsBtn, "LEFT", -6, 0)
 
     -- Stats panel, drawn over the table rows.
     ui.statsLines = {}
@@ -237,6 +244,12 @@ local function buildFooter(frame)
         if t and t.seats[2] and t.seats[2].bot then Table.removeBot() else Table.addBot(ns.db.level) end
     end)
     ui.botBtn:SetPoint("LEFT", ui.levelBtn, "RIGHT", 6, 0)
+    -- Host: hand seat 1 to a bot (then referee a bot match) or take it back.
+    ui.seatBtn = newButton(frame, "Bot in My Seat", 110, function()
+        local t = Table.cur
+        if t and t.seats[1] and t.seats[1].bot then Table.hostSit() else Table.hostSeatBot(ns.db.level) end
+    end)
+    ui.seatBtn:SetPoint("LEFT", ui.botBtn, "RIGHT", 6, 0)
     ui.stopBtn = newButton(frame, "Stop", 60, function()
         if Table.cur then Table.leave(true) else Game.stop() end
     end)
@@ -259,6 +272,8 @@ local function applyMode(mode)
     setShown(ui.demoBtn, mode == "lobby")
     setShown(ui.levelBtn, mode == "lobby" or isHost)
     setShown(ui.botBtn, isHost)
+    setShown(ui.seatBtn, isHost)
+    if ui.betsPanel then setShown(ui.betsPanel, mode == "table" and t ~= nil) end
     setShown(ui.playBtn, t ~= nil and t.role ~= "spectator")
     setShown(ui.stopBtn, mode ~= "lobby")
     ui.levelBtn:ClearAllPoints()
@@ -401,7 +416,19 @@ function ui.renderLobby()
     local now = GetTime()
     if ui.lobbyAt and now - ui.lobbyAt < 0.5 then return end
     ui.lobbyAt = now
+    if ui.hideLedger then ui.hideLedger() end
     if ui.showingStats then return renderStats() end
+    if ui.showingLedger and ui.renderLedger then
+        for _, row in ipairs(ui.rows) do row:Hide() end
+        for _, fs in ipairs(ui.statsLines) do fs:SetText("") end
+        ui.empty:SetText("")
+        ui.pageText:SetText("")
+        setShown(ui.prevBtn, false)
+        setShown(ui.nextBtn, false)
+        ui.statsBtn:SetText("Stats")
+        ui.lobbyTitle:SetText("Ledger")
+        return ui.renderLedger()
+    end
     ui.statsBtn:SetText("Stats")
     ui.lobbyTitle:SetText("Tables")
     for _, fs in ipairs(ui.statsLines) do fs:SetText("") end
@@ -451,6 +478,9 @@ function ui.render(now)
     setEnabled(ui.playBtn, Table.canStart())
     ui.stopBtn:SetText(t and "Leave" or "Stop")
     if t and t.role == "host" then
+        local s1 = t.seats[1]
+        ui.seatBtn:SetText((s1 and s1.bot) and "Take My Seat" or "Bot in My Seat")
+        setEnabled(ui.seatBtn, not (m and Game.networked and m.phase ~= "over"))
         local s2 = t.seats[2]
         ui.botBtn:SetText((s2 and s2.bot) and "Remove Bot" or "Add Bot")
         setEnabled(ui.botBtn, not (m and Game.networked and m.phase ~= "over") and (not s2 or s2.bot ~= nil))
@@ -540,6 +570,11 @@ function ui.startDemo(level1, level2)
     Game.startLocal({ { kind = "bot", level = level1 or level }, { kind = "bot", level = level2 or level } })
     ui.show()
 end
+
+-- Widget helpers for other UI files (BetsUI.lua).
+ui.lib = { newFrame = newFrame, styleAsPanel = styleAsPanel, newText = newText, newRect = newRect,
+    newButton = newButton, setShown = setShown, setEnabled = setEnabled }
+ui.FRAME_H, ui.FONT = FRAME_H, FONT
 
 table.insert(ns.onLoaded, build)
 

@@ -409,9 +409,10 @@ def test_lobby():
           "lobby shows the live score: %s" % (r[0].detail.text if r else None))
     check(not enabled(r[0].sit) and enabled(r[0].watch), "can watch a match in progress")
     net.until(lambda: over(a), 600)
-    net.run(3)
+    net.run(6)
     ud = show(d)
-    check("Finished" in rows(ud)[0].detail.text, "lobby shows the final score")
+    check("Finished" in rows(ud)[0].detail.text, "lobby shows the final score (%s; host tokens %.1f, queued %d)"
+          % (rows(ud)[0].detail.text, a.ns.Net.tokens(), a.ns.Net.queued()))
 
     # Leaving puts Bob back in the lobby; the host's bot button works.
     ub.stopBtn.scripts.OnClick(ub.stopBtn)
@@ -462,7 +463,7 @@ def test_lobby_pages_and_versions():
     c = Client()
     c.run(6)
     for i in range(8):
-        c.fire("CHAT_MSG_ADDON", "WoWPong", "T;2;9-%04d;Host%d;9-%04d;Host%d;;;open;0;0" % (i, i, i, i),
+        c.fire("CHAT_MSG_ADDON", "WoWPong", "T;3;9-%04d;Host%d;9-%04d;Host%d;;;open;0;0;0" % (i, i, i, i),
                "CHANNEL", "x", "", 0, 5)
     c.fire("CHAT_MSG_ADDON", "WoWPong", "T;1;9-9999;Zed;9-9999;Zed;;", "CHANNEL", "Zed", "", 0, 5)
     ui = show(c)

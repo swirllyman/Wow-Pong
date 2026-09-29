@@ -21,6 +21,8 @@ Game.lua
 Net.lua
 Table.lua
 Stats.lua
+Bets.lua
 Invite.lua
 UI.lua
+BetsUI.lua
 Minimap.lua

@@ -3,7 +3,7 @@
 --
 -- Messages (fields after the type; pids are Net.pid() ids, "v" is Net.VERSION):
 --   Q;v                                    who's hosting? hosts answer with T
---   T;v;host;hostName;s1pid;s1name;s2pid;s2name;state;score1;score2
+--   T;v;host;hostName;s1pid;s1name;s2pid;s2name;state;score1;score2;matchNo
 --                                          table state (s2pid "bot:<level>" for a bot, "" when free; state is
 --                                          open / ready / playing / over). Sent on changes, each point, every 30s
 --   J;v;host;pid;name                      ask to sit in seat 2
@@ -108,7 +108,8 @@ local function announce()
     if not t or t.role ~= "host" then return end
     local state, m = tableState(t)
     Net.sendLow(Net.msg("T", Net.VERSION, t.host, t.hostName, seatPid(t.seats[1]), seatName(t.seats[1]),
-        seatPid(t.seats[2]), seatName(t.seats[2]), state, m and m.score[1] or 0, m and m.score[2] or 0), "T")
+        seatPid(t.seats[2]), seatName(t.seats[2]), state, m and m.score[1] or 0, m and m.score[2] or 0,
+        t.matchNo), "T")
     t.lastAnnounce = GetTime()
     t.announceAt = nil
 end
@@ -130,8 +131,14 @@ local function beginMatch(t, matchNo)
     t.pending = {}
     t.buffer = {}
     local mySeat = Table.mySeat()
-    local s2 = t.seats[2]
+    local s1, s2 = t.seats[1], t.seats[2]
     local host = t.role == "host"
+    local bots
+    if host then
+        bots = {}
+        if s1 and s1.bot then bots[1] = s1.bot end
+        if s2 and s2.bot then bots[2] = s2.bot end
+    end
     local opponent
     local other = mySeat and t.seats[3 - mySeat]
     if other and other.bot then
@@ -141,23 +148,29 @@ local function beginMatch(t, matchNo)
     end
     Game.begin({
         opponent = opponent,
-        names = { seatName(t.seats[1]), seatName(s2) },
+        names = { seatName(s1), seatName(s2) },
         seats = { host, (host and s2 and s2.bot ~= nil) or (mySeat == 2) },
         host = host,
         humanSeat = mySeat,
-        bots = (host and s2 and s2.bot) and { [2] = s2.bot } or nil,
+        bots = bots,
         base = t.base,
         networked = true,
     })
 end
 
+-- Players can start; so can the host while a bot sits in its seat (it referees a bot match).
 function Table.canStart()
     local t = Table.cur
-    if not t or live() or not Table.mySeat() then return false end
+    if not t or live() then return false end
     local s2 = t.seats[2]
     if not (t.seats[1] and s2) then return false end
     if t.role == "host" then return s2.bot ~= nil or t.guestReady == true end
-    return t.synced == true
+    return Table.mySeat() ~= nil and t.synced == true
+end
+
+-- Seat occupants changed (someone joined/left, a bot was added/removed/swapped in). Bets.lua voids the book.
+local function seatsChanged(t)
+    if Table.onSeatsChanged then Table.onSeatsChanged(t) end
 end
 
 -- Play Now: the host starts right away; a guest asks the host.
@@ -178,7 +191,7 @@ function Table.start()
 end
 
 -- Hosts re-announce when the score or match state changes, and track idleness.
-Game.onEvent = function(ev)
+Game.listeners[#Game.listeners + 1] = function(ev)
     local t = Table.cur
     if not t or t.role ~= "host" or not Game.networked then return end
     if ev.type == "START" or ev.type == "MISS" or ev.type == "FORFEIT" then announceSoon() end
@@ -265,6 +278,7 @@ function Table.addBot(level)
     level = Bot.PROFILES[level or ""] and level or ns.db.level or "normal"
     t.seats[2] = { pid = "bot:" .. level, bot = level, name = "Bot (" .. Bot.NAMES[level] .. ")" }
     if Game.networked then Game.stop() end   -- the old result belongs to the previous opponent
+    seatsChanged(t)
     announce()
 end
 
@@ -273,6 +287,27 @@ function Table.removeBot()
     if not t or t.role ~= "host" or live() or not (t.seats[2] and t.seats[2].bot) then return end
     t.seats[2] = nil
     if Game.networked then Game.stop() end
+    seatsChanged(t)
+    announce()
+end
+
+-- Host: hand seat 1 to a bot (and referee a bot match), or take it back.
+function Table.hostSeatBot(level)
+    local t = Table.cur
+    if not t or t.role ~= "host" or live() then return end
+    level = Bot.PROFILES[level or ""] and level or ns.db.level or "normal"
+    t.seats[1] = { pid = "bot:" .. level, bot = level, name = "Bot (" .. Bot.NAMES[level] .. ")" }
+    if Game.networked then Game.stop() end
+    seatsChanged(t)
+    announce()
+end
+
+function Table.hostSit()
+    local t = Table.cur
+    if not t or t.role ~= "host" or live() or not (t.seats[1] and t.seats[1].bot) then return end
+    t.seats[1] = { pid = me(), name = Net.name() }
+    if Game.networked then Game.stop() end
+    seatsChanged(t)
     announce()
 end
 
@@ -326,6 +361,9 @@ end
 local function adopt(info, role)
     local t = newTable(role, info.host, info.hostName)
     t.seats = { info.seats[1], info.seats[2] }
+    -- Between matches, carry on the host's match count (bets are for matchNo + 1). Mid-match, the snapshot or the
+    -- next START sets it.
+    if info.state ~= "playing" and info.state ~= "over" then t.matchNo = info.matchNo or 0 end
     t.lastHeard[info.host] = GetTime()
     return t
 end
@@ -391,6 +429,7 @@ function Table.leave(quiet)
         if live() then Game.push({ type = "FORFEIT", t = Game.clock(), seat = 1 }) end
         flushEvents(t, math.huge)
         Net.send(Net.msg("X", t.host))
+        if Table.onClosed then Table.onClosed(t.host) end
     elseif t.role == "guest" then
         -- Leaving mid-match forfeits: the host announces it; record it here too.
         if live() and Table.mySeat() then
@@ -451,7 +490,8 @@ H.T = function(f, now)
     if host == me() then return end
     local info = { version = tonumber(f[2]), host = host, hostName = f[4] or "?",
         seats = { parseSeat(f[5], f[6]), parseSeat(f[7], f[8]) }, heardAt = now,
-        state = f[9] or "open", score = { tonumber(f[10]) or 0, tonumber(f[11]) or 0 } }
+        state = f[9] or "open", score = { tonumber(f[10]) or 0, tonumber(f[11]) or 0 },
+        matchNo = tonumber(f[12]) or 0 }
     Table.known[host] = info
     local t = Table.cur
     if not t or t.host ~= host or t.role == "host" then return end
@@ -470,6 +510,7 @@ end
 
 H.X = function(f)
     Table.known[f[2]] = nil
+    if Table.onClosed then Table.onClosed(f[2]) end
     local t = Table.cur
     if not t or t.host ~= f[2] or t.role == "host" then return end
     forfeit(t, 1, "host closed the table")
@@ -487,10 +528,12 @@ H.J = function(f, now)
         announce()   -- they'll see the seat is taken
         return
     end
-    if not (s2 and s2.pid == pid) and Game.networked and not live() then Game.stop() end   -- new opponent
+    local changed = not (s2 and s2.pid == pid)
+    if changed and Game.networked and not live() then Game.stop() end   -- new opponent
     t.seats[2] = { pid = pid, name = name }
     t.guestReady = false
     heard(t, pid, now)
+    if changed then seatsChanged(t) end
     announce()
     say(name .. " joined your table")
 end
@@ -502,6 +545,7 @@ H.L = function(f)
     if not s2 or s2.pid ~= f[3] then return end
     forfeit(t, 2, s2.name .. " left")
     t.seats[2] = nil
+    seatsChanged(t)
     announce()
     say(s2.name .. " left your table")
 end
@@ -692,6 +736,7 @@ Net.onUpdate = function(now)
             forfeit(t, 2, s2.name .. " went quiet")
             say(s2.name .. " disconnected")
             t.seats[2] = nil
+            seatsChanged(t)
             announce()
         end
         if not live() and now - t.idleSince > IDLE_CLOSE then
@@ -707,6 +752,7 @@ Net.onUpdate = function(now)
         forfeit(t, 1, "host went quiet")
         say(t.hostName .. "'s table is gone (no word for " .. TIMEOUT .. "s)")
         Table.cur = nil
+        if Table.onClosed then Table.onClosed(t.host) end
     end
 end
 

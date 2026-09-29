@@ -12,7 +12,7 @@ ns.Net = Net
 
 Net.PREFIX = "WoWPong"
 Net.CHANNEL = "WoWPongLobby"
-Net.VERSION = 2
+Net.VERSION = 3
 Net.MAX_BYTES = 255
 
 local BURST, REGEN = 8, 0.9       -- our token bucket: capacity, tokens per second
@@ -171,11 +171,12 @@ function Net.flush()
     while queue[1] and Net.trySend(queue[1]) do table.remove(queue, 1) end
 end
 
--- Low priority (table announcements, keepalives, queries, pings): sent only when the normal queue is empty and a
--- token would still be left for match events, so they never delay a hit or a serve. A newer message with the same
--- key replaces a queued one (e.g. only the latest table state matters).
-local lowQueue = {}   -- { text, key }
-local LOW_MIN_TOKENS = 2
+-- Low priority (table announcements, keepalives, queries): sent only when the normal queue is empty and a token
+-- would still be left for match events, so a fresh announcement never delays a hit or a serve. Mid-match the budget
+-- rarely has that spare token, so a message that has waited LOW_MAX_WAIT may take the last one (the lobby's live
+-- score lags a few seconds at most). A newer message with the same key replaces a queued one but keeps its place.
+local lowQueue = {}   -- { text, key, since }
+local LOW_MIN_TOKENS, LOW_MAX_WAIT = 2, 3
 
 function Net.sendLow(text, key)
     if key then
@@ -186,12 +187,14 @@ function Net.sendLow(text, key)
             end
         end
     end
-    lowQueue[#lowQueue + 1] = { text = text, key = key }
+    lowQueue[#lowQueue + 1] = { text = text, key = key, since = GetTime() }
     Net.flushLow()
 end
 
 function Net.flushLow()
-    while lowQueue[1] and not queue[1] and Net.tokens() >= LOW_MIN_TOKENS and Net.trySend(lowQueue[1].text) do
+    while lowQueue[1] and not queue[1] do
+        local need = (GetTime() - lowQueue[1].since >= LOW_MAX_WAIT) and 1 or LOW_MIN_TOKENS
+        if Net.tokens() < need or not Net.trySend(lowQueue[1].text) then return end
         table.remove(lowQueue, 1)
     end
 end

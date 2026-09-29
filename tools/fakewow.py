@@ -200,6 +200,7 @@ function UnitName(u)
     -- Forever returns the surname in the realm slot ("Bear", "Joegre"); ME.surname models that.
     if u == "player" then return ME.secretName and MakeSecret(ME.name) or ME.name, ME.surname end
     if u == "target" and TARGET then return TARGET.name, nil end
+    if u == "npc" and NPC then return NPC.name, nil end
 end
 function UnitFullName(u) if u == "player" then return ME.name, ME.nrealm end end
 function GetUnitName(u, full)
@@ -209,9 +210,17 @@ end
 function UnitGUID(u)
     if u == "player" then return ME.guid end
     if u == "target" and TARGET then return TARGET.guid end
+    if u == "npc" and NPC then return NPC.guid end
 end
 function UnitIsPlayer(u) return u == "target" and TARGET ~= nil end
 function UnitExists(u) return u == "player" or (u == "target" and TARGET ~= nil) end
+
+-- Trade window: NPC = { name, guid } is the trade partner ("npc" unit while trading).
+tradeMoney = { player = 0, target = 0, set = nil }
+function SetTradeMoney(c) tradeMoney.set = c; tradeMoney.player = c end
+function GetPlayerTradeMoney() return tradeMoney.player end
+function GetTargetTradeMoney() return tradeMoney.target end
+ERR_TRADE_COMPLETE = "Trade complete."
 function GetPlayerInfoByGUID(guid)
     local who = guid == ME.guid and ME or (TARGET and TARGET.guid == guid and TARGET) or PEERS[guid]
     if who then return "Mage", "MAGE", "Human", "Human", 2, who.name, "" end

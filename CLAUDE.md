@@ -32,7 +32,9 @@ ball will arrive is the skill.
      "First Surname" or pid (target). Opens your table if needed; Accept/Decline popup (15s); accepting seats them.
      Answers: accepted / declined / busy (mid-match) / different version / no answer after 15s.
 
-All five planned steps are built. Next: real in-game testing with a guildmate, then tuning.
+6. **Gold bets**, done and tested headlessly, **not yet tried in-game** (see "Bets" below). Protocol version 3.
+
+All planned steps are built. Next: real in-game testing with a guildmate, then tuning.
 
 ## Design decisions (from the user, don't re-ask)
 
@@ -46,6 +48,10 @@ All five planned steps are built. Next: real in-game testing with a guildmate, t
   10 minutes; local Practice + Watch Bots stay in the lobby footer.
 - Stats: human record + separate bot record; totals + head-to-head. Invites go over the channel; no answer just
   tells the inviter (nothing sent to non-addon players).
+- Bets: honor ledger (the addon can't move gold), even-money offers someone clicks Take on, players may only back
+  themselves, betting closes when Play Now is pressed, no stake limits, full debt tracking with trade assist, host
+  vanishing mid-match voids bets, Ledger button in the lobby. The host may hand seat 1 to a bot (bot-vs-bot tables
+  to bet on); it then referees and can still press Play Now.
 - Ask the user design questions as **multiple choice** (AskUserQuestion), never as prose lists.
 
 ## How the simulation works (`Sim.lua`)
@@ -77,11 +83,26 @@ All five planned steps are built. Next: real in-game testing with a guildmate, t
 - Throttle: our token bucket (8 burst, 0.9/s) stays under the client's (10, 1/s). Send priority: the normal queue
   (control messages, sealed snapshot events) first, then match events (non-MOVE at once; MOVEs batch while
   tokens < 4, max 0.25s wait), then the low queue (`Net.sendLow`: T announcements, Q, K keepalives; only when 2+
-  tokens remain, newer message with the same key replaces a queued one). A late MOVE is still applied after the
+  tokens remain, or 1 once it has waited 3s; newer message with the same key replaces a queued one). A late MOVE is still applied after the
   match is over, so paddles end in sync. A bot-vs-bot networked match uses ~1 message/s per player, right
   at the limit: check `/pong net` (throttled count) in real playtests.
 - Latency costs the receiving player reaction time (the opponent's hit shows up late and the ball jumps ahead);
   that's the fair, symmetric choice. Visual smoothing of the jump is a possible polish item.
+
+## Bets (`Bets.lua`, `BetsUI.lua`)
+
+- Message list at the top of Bets.lua (B offer, U take request, N withdraw request, M host: taken, D host: dropped /
+  "*" void round, G host: result). The host referees: first take it receives wins, invalid offers get D. Bets are
+  for round = table matchNo + 1; T carries matchNo so late arrivals bet on the right round.
+- Seats changing hands (join/leave/timeout/bot add/remove/host seat swap, via `Table.onSeatsChanged`) voids the
+  round. START voids unmatched offers. G settles; a table closing or the host timing out before G voids
+  (`Table.onClosed`). Unresolved bets expire after 2h.
+- Per character: `WoWPongCharDB.ledger` (pid -> name, balance in copper (> 0: they owe me), last 20 log lines) and
+  `pendingBets` (matched bets awaiting G). Trade assist: on TRADE_SHOW with someone you owe, `SetTradeMoney`
+  (pcalled) pre-fills; TRADE_ACCEPT_UPDATE snapshots both amounts; UI_INFO_MESSAGE == ERR_TRADE_COMPLETE applies
+  the net to the ledger. Unverified in-game: whether SetTradeMoney is allowed and the exact completion message.
+- UI: side panel right of the window at a table (status, offers with Take/Cancel, side + gold + Bet); lobby
+  "Ledger" view with Settled buttons; `/pong ledger`.
 
 ## Layout
 
@@ -98,10 +119,13 @@ All five planned steps are built. Next: real in-game testing with a guildmate, t
 | `WoWPong/Net.lua` | Channel join/hide, token-bucket sending (`trySend`, queued `send`), CHAT_MSG_ADDON dispatch to `Net.handlers`, `Net.onUpdate` pump |
 | `WoWPong/Table.lua` | Tables and networked matches: host/join/watch/bot/start/leave, clock sync, event batching, keepalives, timeouts and forfeits, `/pong ping` and `/pong net`, `Table.status()` for the window |
 | `WoWPong/Stats.lua` | Per-character records (`Stats.record` via `Game.onOver`, `Stats.lines`, `Stats.summary`), `/pong stats` |
+| `WoWPong/Bets.lua` | Offer book, host refereeing, settlement, ledger, trade assist, `/pong ledger` |
+| `WoWPong/BetsUI.lua` | Bets side panel and lobby Ledger view (uses `ui.lib` helpers from UI.lua) |
 | `WoWPong/Invite.lua` | `/pong invite`, V/A handlers, auto-seat on accept |
 | `WoWPong/UI.lua` | The window: lobby view (table rows, paging, Stats panel) and table view (board, rendering, click-to-move), mode-dependent footer, invite popup (`ui.showInvite`), `/pong`, `/pong practice [level]`, `/pong demo [l1] [l2]`, `/pong stop` |
 | `WoWPong/Minimap.lua` | LDB launcher + LibDBIcon registration (skipped gracefully without the libs), `WoWPong_OnCompartmentClick`, `/pong minimap` |
 | `tools/make_icon.py` | Regenerates `Media/icon.tga` |
+| `tools/test_bets.py` | Money parsing, offers via the panel, self-only rule, double takes, withdraw, closing at Play Now, symmetric settlement, voiding (seat change, host vanishing), bot-vs-bot refereed by the host, Ledger view, trade assist |
 | `tools/test_extras.py` | Stats (players, bots, forfeits, head-to-head, panel), invites (name, target, surname, accept/decline/busy/no answer/full, replacing a bot), minimap with stub libs and without |
 | `tools/fakewow.py` | Fake WoW client (lupa) adapted from AzerothWordle: loads the real files in .toc order; `run(sec, fps)` fires OnUpdate on shown frames, `click_board(y)`, per-client `start_time`, the client's addon-message throttle |
 | `tools/test_net.py` | Several fake clients through a simulated channel with latency/jitter/disconnects: codec, join + clock sync, full matches all clients agree on, 300ms latency, forfeits, host leaving/vanishing, keepalive, bot table, full table, version mismatch, ping, late spectators (snapshots, buffering, lost snapshots) |

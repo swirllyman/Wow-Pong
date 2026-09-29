@@ -16,7 +16,7 @@ Game.auth = nil         -- see Sim.step
 Game.base = 0           -- match time = GetTime() - base (the host's clock, for networked matches)
 Game.networked = false
 Game.onLocalEvent = nil -- function(ev): an event created here was applied (Table broadcasts it)
-Game.onEvent = nil      -- function(ev): any event was applied, local or remote
+Game.listeners = {}     -- functions(ev) called for every applied event, local or remote
 Game.onOver = nil       -- function(match): a match this client played in ended (Stats records it)
 Game.opponent = nil     -- who the local human faces: { kind = "human", pid, name } or { kind = "bot", level }
 
@@ -36,7 +36,7 @@ local function onApplied(ev)
             Game.names[2] or "?", Game.names[m.winner] or "?", m.forfeit and " (forfeit)" or ""))
         if Game.humanSeat and Game.onOver then Game.onOver(m) end
     end
-    if Game.onEvent then Game.onEvent(ev) end
+    for _, fn in ipairs(Game.listeners) do fn(ev) end
 end
 
 local function created(ev)
