@@ -15,7 +15,12 @@ ball will arrive is the skill.
    footer has Practice vs Bot / Bot level / Watch Bots (local only). At a table: Bot level + Add/Remove Bot (host),
    Play Now (players), Leave. Hosts announce T every 30s, on changes and each point; lists drop tables unheard for
    75s; a table with no match for 10 minutes closes. Protocol version is 2 (T gained state and score).
-4. **Spectating mid-match**: late joiners currently wait for the next START; add a snapshot from the host.
+4. **Spectating mid-match**, done and tested headlessly, **not yet tried in-game**. A spectator who arrives
+   mid-match (or after it ended) sends W; the host answers with one Z snapshot for everyone waiting (at most every
+   2s). Because the host's send budget is always nearly spent mid-match, the snapshot jumps the queue: the host's
+   unsent events are sealed into numbered E messages right before it, and the Z carries the last host/guest E seq
+   it covers so spectators skip repeats. Spectators buffer E messages until the Z arrives, retry W every 6s, and
+   give up after 3 tries (then just wait for the next START). Catching up takes a few seconds in a busy match.
 5. **Extras**: LibDBIcon minimap button, per-character win/loss stats, `/pong invite Name` whisper challenge.
 
 ## Design decisions (from the user, don't re-ask)
@@ -68,7 +73,7 @@ ball will arrive is the skill.
 |---|---|
 | `WoWPong/WoWPong.toc` | Interface 16001 (Forever build 1.60.1). SavedVariables `WoWPongDB` (log, window position, bot level) |
 | `WoWPong/Core.lua` | Namespace, `ns.isSecret/show`, saved log (`ns.log`), event dispatch (`ns.on`), `/pong` dispatcher (`ns.commands`, `ns.help`), `ns.onLoaded` |
-| `WoWPong/Codec.lua` | Pure event wire format (`encodeEvent`/`decodeEvent`/`normalize`/`pack`/`split`) |
+| `WoWPong/Codec.lua` | Pure wire format: events (`encodeEvent`/`decodeEvent`/`normalize`), match snapshots (`encodeSnapshot`/`decodeSnapshot`), `pack`, `split` |
 | `WoWPong/Sim.lua` | The deterministic simulation (above) |
 | `WoWPong/Bot.lua` | Bots: react after a delay, guess the arrival point with difficulty-based error, optional correction click, aim off-centre for angles. They emit ordinary MOVE events |
 | `WoWPong/Game.lua` | The current match on this client: seats, bots, authority, match clock (`Game.clock()`), driver frame calling `Game.tick`, `Game.click`, `Game.push` (local events -> `Game.onLocalEvent`), `Game.receive` (remote) |
@@ -76,7 +81,7 @@ ball will arrive is the skill.
 | `WoWPong/Table.lua` | Tables and networked matches: host/join/watch/bot/start/leave, clock sync, event batching, keepalives, timeouts and forfeits, `/pong ping` and `/pong net`, `Table.status()` for the window |
 | `WoWPong/UI.lua` | The window: lobby view (table rows, paging) and table view (board, rendering, click-to-move), mode-dependent footer, `/pong`, `/pong practice [level]`, `/pong demo [l1] [l2]`, `/pong stop` |
 | `tools/fakewow.py` | Fake WoW client (lupa) adapted from AzerothWordle: loads the real files in .toc order; `run(sec, fps)` fires OnUpdate on shown frames, `click_board(y)`, per-client `start_time`, the client's addon-message throttle |
-| `tools/test_net.py` | Several fake clients through a simulated channel with latency/jitter/disconnects: codec, join + clock sync, full matches all clients agree on, 300ms latency, forfeits, host leaving/vanishing, keepalive, bot table, full table, version mismatch, ping |
+| `tools/test_net.py` | Several fake clients through a simulated channel with latency/jitter/disconnects: codec, join + clock sync, full matches all clients agree on, 300ms latency, forfeits, host leaving/vanishing, keepalive, bot table, full table, version mismatch, ping, late spectators (snapshots, buffering, lost snapshots) |
 | `tools/test_sim.py` | Sim + Bot unit tests, event replay, full bot matches at every level with a balance report |
 | `tools/test_ui.py` | Drives the window: open/close, practice with clicks, bot win, demo to 7, stop, level cycling |
 

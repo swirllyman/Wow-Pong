@@ -153,6 +153,12 @@ function Net.send(text, front)
     Net.flush()
 end
 
+-- Puts several messages at the head of the queue, keeping their order.
+function Net.sendFirst(list)
+    for i = #list, 1, -1 do table.insert(queue, 1, list[i]) end
+    Net.flush()
+end
+
 function Net.flush()
     while queue[1] and Net.trySend(queue[1]) do table.remove(queue, 1) end
 end

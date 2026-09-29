@@ -50,6 +50,8 @@ class Network:
         self.inflight = []   # (deliver_at, order, text, sender)
         self.order = 0
         self.cut = set()     # clients whose messages vanish (disconnected)
+        self.drop = lambda text, sender: False   # per-message loss filter
+        self.sent = []       # (sender name, text) of everything put on the channel
         for c in self.clients:
             g = c.lua.globals()
             g.NS = c.ns
@@ -61,8 +63,9 @@ class Network:
             for c in self.clients:
                 c.lua.globals().RunFrames(dt, fps)
                 for m in c.take_outbox():
-                    if m["dist"] != "CHANNEL" or c in self.cut:
+                    if m["dist"] != "CHANNEL" or c in self.cut or self.drop(m["text"], c):
                         continue
+                    self.sent.append((c.name, m["text"]))
                     delay = self.latency + self.rng.random() * self.jitter
                     # Messages from one sender stay in order, like a real chat channel.
                     last = max([d for d, _, _, s in self.inflight if s is c], default=0)
@@ -471,6 +474,121 @@ def test_lobby_pages_and_versions():
     check(zed and not enabled(zed[0].sit) and not enabled(zed[0].watch), "old-version table can't be joined")
 
 
+def test_snapshot_codec():
+    c = Client()
+    ns, lua = c.ns, c.lua
+    m = ns.Sim.newMatch()
+    ns.Sim.apply(m, lua.table_from({"type": "START", "t": 0}))
+    ns.Sim.apply(m, lua.table_from({"type": "MOVE", "t": 1, "seat": 1, "y": 250}))
+    ns.Sim.apply(m, lua.table_from({"type": "SERVE", "t": 3, "dir": -1, "angle": 0.3}))
+    s = ns.Codec.encodeSnapshot(m)
+    check(len(s) < 180, "snapshot fits comfortably in a message (%d bytes)" % len(s))
+    snap = ns.Codec.decodeSnapshot(s)
+    r = ns.Sim.newMatch()
+    ns.Sim.restore(r, snap)
+    same = r.phase == "play" and r.score[1] == 0 and abs(r.serveAt or 0) == 0
+    for t in (3.5, 4.2):
+        bx, by = ns.Sim.ballPos(m, t)
+        rx, ry = ns.Sim.ballPos(r, t)
+        same = same and abs(bx - rx) < 0.01 and abs(by - ry) < 0.01
+        same = same and abs(ns.Sim.paddleY(m, 1, t) - ns.Sim.paddleY(r, 1, t)) < 0.01
+    check(same, "restored snapshot continues the same ball and paddles")
+    check(ns.Codec.decodeSnapshot("p,1,2") is None, "bad snapshot rejected")
+
+
+def start_match(net, a, b, level_a="hard", level_b="normal"):
+    a.slash("host")
+    net.run(1)
+    b.slash("join alice")
+    net.run(4)
+    a.slash("start")
+    pilot(a, level_a)
+    pilot(b, level_b)
+
+
+def info_of(client, host):
+    return client.ns.Table.known[host.ns.Net.pid()]
+
+
+def test_late_spectator():
+    net, (a, b, c, d) = setup(n=4, latency=0.15, jitter=0.1)
+    start_match(net, a, b)
+    net.until(lambda: sum(score(a)[:2]) >= 2, 300)
+    net.run(1.3)   # mid-rally
+    c.slash("tables")
+    net.run(2)
+    uc = show(c)
+    r = rows(uc)
+    r[0].watch.scripts.OnClick(r[0].watch)
+    d.slash("watch alice")   # a second spectator at the same moment
+    net.run(0.3)
+    status = c.ns.Table.status()
+    check(status is not None and "Catching up" in status[1], "spectator shows it's catching up")
+    net.run(8)
+    check(match_of(c) is not None and match_of(d) is not None, "late spectators get the match in progress")
+    check(score(c)[:2] == score(a)[:2], "late spectator shows the current score %s" % (score(c),))
+    zs = [t for n, t in net.sent if t.startswith("Z;")]
+    check(len(zs) == 1, "one snapshot served both spectators (%d sent)" % len(zs))
+    check(any("caught up" in l for l in c.log()), "spectator logged catching up")
+    net.until(lambda: over(a) and over(b) and over(c) and over(d), 600)
+    check(score(a) == score(b) == score(c) == score(d), "late spectators agree on the final result %s / %s"
+          % (score(a), score(c)))
+    ma, mc = match_of(a), match_of(c)
+    same = all(abs(mc.paddles[s].target - ma.paddles[s].target) < 0.01 for s in (1, 2))
+    check(same, "late spectator's paddles end where the players' do")
+    gaps = [l for l in c.log() + d.log() if "seq gap" in l]
+    check(not gaps, "no gaps after catching up: %s" % gaps[:2])
+
+    # Next match starts normally for them.
+    a.slash("start")
+    net.run(2)
+    check(match_of(c).phase in ("countdown", "play") and c.ns.Table.cur.matchNo == 2, "rematch reaches them")
+    check(not errors((a, b, c, d)), "no errors: %s" % errors((a, b, c, d))[:3])
+
+
+def test_late_spectator_bot_and_finished():
+    net, (a, c) = setup(n=2)
+    a.slash("host")
+    a.slash("bot easy")
+    net.run(1)
+    a.slash("start")
+    pilot(a, "hard")
+    net.run(20)
+    c.slash("watch alice")
+    net.run(8)
+    check(match_of(c) is not None and score(c)[:2] == score(a)[:2], "late spectator catches up on a bot match")
+    net.until(lambda: over(a) and over(c), 600)
+    check(score(a) == score(c), "bot match result agrees")
+    net.run(3)
+    e = Client(name="Eve", guid="Player-1-0009", start_time=42.5)
+    net.clients.append(e)
+    e.lua.globals().NS = e.ns
+    net.run(40)   # joins the channel, hears the next periodic announcement
+    e.slash("watch alice")
+    net.run(4)
+    check(over(e) and score(e) == score(a), "watching a finished table shows the result")
+    ue = show(e)
+    check(ue.status.text.endswith("wins!"), "and the winner in the window")
+
+
+def test_snapshot_lost():
+    net, (a, b, c) = setup()
+    start_match(net, a, b)
+    net.run(10)
+    net.drop = lambda text, sender: text.startswith("Z;")
+    c.slash("watch alice")
+    net.run(22)
+    check(match_of(c) is None and c.ns.Table.cur.snapGaveUp, "spectator gives up after a few unanswered requests")
+    ws = [t for n, t in net.sent if n == "Cara" and t.startswith("W;")]
+    check(len(ws) == 3, "asked 3 times (%d)" % len(ws))
+    net.drop = lambda text, sender: False
+    net.until(lambda: over(a), 600)
+    a.slash("start")
+    net.run(2)
+    check(match_of(c) is not None and match_of(c).phase in ("countdown", "play"),
+          "and simply picks up the next match")
+
+
 if __name__ == "__main__":
     test_codec()
     test_join_sync_and_match()
@@ -486,6 +604,10 @@ if __name__ == "__main__":
     test_lobby()
     test_lobby_freshness()
     test_lobby_pages_and_versions()
+    test_snapshot_codec()
+    test_late_spectator()
+    test_late_spectator_bot_and_finished()
+    test_snapshot_lost()
     if failures:
         print("%d FAILED" % failures)
         sys.exit(1)

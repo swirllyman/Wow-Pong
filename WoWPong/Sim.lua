@@ -173,6 +173,14 @@ function apply.FORFEIT(m, ev)
     m.trajectory = m.trajectory + 1
 end
 
+-- Overwrites m with a snapshot (Codec.decodeSnapshot) so a late spectator can carry on from there.
+function Sim.restore(m, s)
+    m.phase, m.score, m.serveAt, m.serveDir = s.phase, s.score, s.serveAt, s.serveDir
+    m.hits, m.winner, m.forfeit = s.hits, s.winner, s.forfeit
+    m.ball, m.paddles = s.ball, s.paddles
+    m.trajectory = m.trajectory + 1
+end
+
 -- Applies one event. Returns false for an unknown type or once the match is over (nothing changes then).
 function Sim.apply(m, ev)
     local fn = apply[ev.type]

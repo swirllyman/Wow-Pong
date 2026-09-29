@@ -63,6 +63,42 @@ function Codec.normalize(ev)
     return Codec.decodeEvent(Codec.encodeEvent(ev))
 end
 
+-- Match snapshots for spectators who arrive mid-match: every field Sim needs to carry on from here, as one
+-- comma-separated string. Times keep 3 decimals, everything else 2.
+local PHASE_CODE = { countdown = "c", play = "p", point = "x", over = "o", idle = "i" }
+local PHASE_BY_CODE = {}
+for k, v in pairs(PHASE_CODE) do PHASE_BY_CODE[v] = k end
+
+function Codec.encodeSnapshot(m)
+    local b, p1, p2 = m.ball, m.paddles[1], m.paddles[2]
+    local n = Codec.num
+    return table.concat({
+        PHASE_CODE[m.phase] or "i", m.score[1], m.score[2], m.serveAt and n(m.serveAt, 3) or "",
+        m.serveDir or 0, m.hits, m.winner or 0, m.forfeit and 1 or 0,
+        n(b.x, 2), n(b.y, 2), n(b.vx, 2), n(b.vy, 2), n(b.speed, 2), n(b.t, 3),
+        n(p1.y, 2), n(p1.target, 2), n(p1.t, 3), n(p2.y, 2), n(p2.target, 2), n(p2.t, 3),
+    }, ",")
+end
+
+function Codec.decodeSnapshot(s)
+    local f = Codec.split(s, ",")
+    if #f ~= 20 or not PHASE_BY_CODE[f[1]] then return nil end
+    local v = {}
+    for i = 2, 20 do
+        if i ~= 4 then
+            v[i] = tonumber(f[i])
+            if not v[i] then return nil end
+        end
+    end
+    local serveDir = v[5] ~= 0 and v[5] or nil
+    return {
+        phase = PHASE_BY_CODE[f[1]], score = { v[2], v[3] }, serveAt = tonumber(f[4]), serveDir = serveDir,
+        hits = v[6], winner = v[7] ~= 0 and v[7] or nil, forfeit = v[8] == 1,
+        ball = { x = v[9], y = v[10], vx = v[11], vy = v[12], speed = v[13], t = v[14] },
+        paddles = { { y = v[15], target = v[16], t = v[17] }, { y = v[18], target = v[19], t = v[20] } },
+    }
+end
+
 -- Splits a message on ";" keeping empty fields.
 function Codec.split(text, sep)
     sep = sep or ";"

@@ -14,6 +14,10 @@
 --   R;host;pid                             guest pressed Play Now
 --   K;host;pid                             keepalive while nothing else was sent for a while
 --   E;host;matchNo;from;seq;ev|ev|...      match events (Codec)
+--   W;host;pid                             a spectator arrived mid-match and wants a snapshot
+--   Z;host;matchNo;hostSeq;guestPid;guestSeq;hostTime;<snapshot>
+--                                          the match as the host has it (Codec.encodeSnapshot), plus the last
+--                                          E seq it holds from each player, so the spectator skips repeats
 --   I;v;pid;name;nonce / O;pid;name;nonce;v;to     /pong ping diagnostic and its answers
 --
 -- Match time is the host's GetTime() minus the table's epoch. The guest measures its offset with C/c pings
@@ -36,6 +40,8 @@ local EXPIRE = 75           -- a table not announced for this long drops off the
 local IDLE_CLOSE = 600      -- a table with no match for this long closes itself
 local QUERY_GAP = 15        -- min seconds between our Q requests
 local ANSWER_GAP = 5        -- hosts don't answer a Q if they announced this recently
+local SNAPSHOT_GAP = 2      -- hosts send at most one snapshot this often (one serves every waiting spectator)
+local SNAPSHOT_RETRY, SNAPSHOT_TRIES = 6, 3
 
 Table.known = {}   -- host pid -> table info from T messages
 Table.cur = nil    -- the table this client is at
@@ -75,7 +81,7 @@ end
 
 local function newTable(role, host, hostName)
     return { role = role, host = host, hostName = hostName, seats = {}, matchNo = 0, lastHeard = {},
-        seq = 0, lastSeq = {}, pending = {}, pendingSince = nil }
+        seq = 0, lastSeq = {}, pending = {}, pendingSince = nil, buffer = {} }
 end
 
 function Table.mySeat()
@@ -122,6 +128,7 @@ local function beginMatch(t, matchNo)
     t.seq = 0
     t.lastSeq = {}
     t.pending = {}
+    t.buffer = {}
     local mySeat = Table.mySeat()
     local s2 = t.seats[2]
     local host = t.role == "host"
@@ -327,10 +334,29 @@ function Table.sit(info)
     Net.send(Net.msg("J", Net.VERSION, info.host, me(), Net.name()))
 end
 
+-- Asks the host for a snapshot of the match in progress (retried a couple of times).
+function Table.requestSnapshot(t)
+    if t.snapGaveUp then return end
+    t.awaiting = true
+    t.snapTries = (t.snapTries or 0) + 1
+    Net.send(Net.msg("W", t.host, me()))
+    C_Timer.After(SNAPSHOT_RETRY, function()
+        if Table.cur ~= t or not t.awaiting then return end
+        if t.snapTries < SNAPSHOT_TRIES then
+            Table.requestSnapshot(t)
+        else
+            t.awaiting, t.snapGaveUp = false, true
+            ns.log("no snapshot from " .. t.hostName .. "; waiting for the next match")
+        end
+    end)
+end
+
 function Table.spectate(info)
     Table.leave(true)
     Game.stop()
-    Table.cur = adopt(info, "spectator")
+    local t = adopt(info, "spectator")
+    Table.cur = t
+    if info.state == "playing" or info.state == "over" then Table.requestSnapshot(t) end
 end
 
 function Table.join(name)
@@ -515,6 +541,15 @@ H.K = function(f, now)
     if t and t.host == f[2] then heard(t, f[3], now) end
 end
 
+-- Applies one E message's events, skipping repeats of what a snapshot already covered.
+local function applyStream(t, from, seq, events)
+    local last = t.lastSeq[from]
+    if last and seq <= last then return end
+    if last and seq ~= last + 1 then ns.log(string.format("net: %s seq gap %d -> %d", from, last, seq)) end
+    t.lastSeq[from] = seq
+    for _, ev in ipairs(events) do Game.receive(ev) end
+end
+
 H.E = function(f, now)
     local t = Table.cur
     local from = f[4]
@@ -539,15 +574,70 @@ H.E = function(f, now)
     end
 
     if matchNo > t.matchNo then
-        if events[1].type ~= "START" then return end   -- joined mid-match: wait for the next one
+        if events[1].type ~= "START" then
+            -- Arrived mid-match: keep these until the host's snapshot says where the match stands.
+            if t.role == "spectator" then
+                t.buffer[#t.buffer + 1] = { matchNo = matchNo, from = from, seq = seq, events = events }
+                if not t.awaiting then Table.requestSnapshot(t) end
+            end
+            return
+        end
+        t.awaiting = false
         beginMatch(t, matchNo)
     elseif matchNo < t.matchNo or not Game.networked then
         return
     end
-    local last = t.lastSeq[from]
-    if last and seq ~= last + 1 then ns.log(string.format("net: %s seq gap %d -> %d", from, last, seq)) end
-    t.lastSeq[from] = seq
-    for _, ev in ipairs(events) do Game.receive(ev) end
+    applyStream(t, from, seq, events)
+end
+
+H.W = function(f, now)
+    local t = Table.cur
+    if not t or t.role ~= "host" or f[2] ~= t.host then return end
+    -- A retry that crossed the snapshot we just sent is already answered.
+    if t.lastSnapshot and now - t.lastSnapshot < SNAPSHOT_RETRY / 2 then return end
+    if Game.networked and Game.match then t.snapshotWanted = true end
+end
+
+-- Host: one snapshot answers every spectator waiting. During a match the send budget is always nearly spent, so
+-- the snapshot jumps the queue: our unsent events are sealed into numbered E messages placed right before it, and
+-- the snapshot's seq tells spectators to skip everything up to and including them.
+local function sendSnapshot(t, now)
+    if not t.snapshotWanted or now - (t.lastSnapshot or -1e9) < SNAPSHOT_GAP then return end
+    t.snapshotWanted = false
+    if not (Game.networked and Game.match) then return end
+    local out = {}
+    for _, body in ipairs(Codec.pack(t.pending, ROOM)) do
+        t.seq = t.seq + 1
+        out[#out + 1] = Net.msg("E", t.host, t.matchNo, me(), t.seq, body)
+    end
+    t.pending, t.pendingSince = {}, nil
+    local s2 = t.seats[2]
+    local guest = (s2 and not s2.bot) and s2.pid or ""
+    out[#out + 1] = Net.msg("Z", t.host, t.matchNo, t.seq, guest, guest ~= "" and (t.lastSeq[guest] or 0) or 0,
+        Codec.num(Game.clock(), 3), Codec.encodeSnapshot(Game.match))
+    Net.sendFirst(out)
+    t.lastSnapshot = now
+end
+
+H.Z = function(f, now)
+    local t = Table.cur
+    if not t or t.role ~= "spectator" or f[2] ~= t.host or not t.awaiting then return end
+    local matchNo, hostSeq, guestSeq, hostTime = tonumber(f[3]), tonumber(f[4]), tonumber(f[6]), tonumber(f[7])
+    local snap = f[8] and Codec.decodeSnapshot(f[8])
+    if not (matchNo and hostSeq and guestSeq and hostTime and snap) or matchNo < t.matchNo then return end
+    heard(t, t.host, now)
+    local b = now - hostTime
+    if not t.base or b < t.base then t.base = b end
+    local buffered = t.buffer
+    beginMatch(t, matchNo)
+    Sim.restore(Game.match, snap)
+    t.lastSeq[t.host] = hostSeq
+    if f[5] ~= "" then t.lastSeq[f[5]] = guestSeq end
+    t.awaiting = false
+    for _, item in ipairs(buffered) do
+        if item.matchNo == matchNo then applyStream(t, item.from, item.seq, item.events) end
+    end
+    ns.log("caught up with " .. t.hostName .. "'s match " .. matchNo .. " from a snapshot")
 end
 
 -- /pong ping diagnostic
@@ -600,6 +690,7 @@ Net.onUpdate = function(now)
         if (t.announceAt and now >= t.announceAt) or now - (t.lastAnnounce or 0) >= ANNOUNCE_EVERY then
             announce()
         end
+        sendSnapshot(t, now)
     elseif now - (t.lastHeard[t.host] or now) > TIMEOUT then
         forfeit(t, 1, "host went quiet")
         say(t.hostName .. "'s table is gone (no word for " .. TIMEOUT .. "s)")
@@ -624,6 +715,7 @@ function Table.status()
         if not t.synced then return "Joining " .. t.hostName .. "'s table...", "" end
         return "Ready", "Press Play Now"
     end
+    if t.awaiting then return "Watching " .. t.hostName .. "'s table", "Catching up with the match..." end
     return "Watching " .. t.hostName .. "'s table", "Waiting for the next match"
 end
 
