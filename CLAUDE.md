@@ -6,13 +6,15 @@ ball will arrive is the skill.
 
 ## Plan and status
 
-1. **Local game** (bot vs bot and practice vs bot), done and tested headlessly, **not yet tried in-game**. The
-   footer buttons (Practice vs Bot / Bot level / Watch Bots / Stop) are temporary until the lobby exists.
-2. **Networked play**, done and tested headlessly with 2-3 fake clients, **not yet tried in-game** (addon messages
-   between real players on Forever are still unverified; the user tests with a guildmate). Slash-command tables:
+1. **Local game** (bot vs bot and practice vs bot), done and tested headlessly, **not yet tried in-game**.
+2. **Networked play**, done and tested headlessly with 2-4 fake clients, **not yet tried in-game** (addon messages
+   between real players on Forever are still unverified; the user tests with a guildmate). Slash commands remain:
    `/pong host`, `join <name>`, `watch <name>`, `bot [level]`, `start`, `leave`, `tables`, `ping`, `net`.
-3. **Lobby UI**: table list, seat buttons, Spectate, on top of Table.lua's protocol. Hosts will need a periodic T
-   announcement (and table expiry) so lists stay fresh; seat 1 is currently always the host.
+3. **Lobby UI**, done and tested headlessly, **not yet tried in-game**. `/pong` opens the lobby: table rows (host,
+   players, Open seat / Ready / Playing x-y / Finished x-y) with Sit and Watch, Open a Table, 6 rows per page;
+   footer has Practice vs Bot / Bot level / Watch Bots (local only). At a table: Bot level + Add/Remove Bot (host),
+   Play Now (players), Leave. Hosts announce T every 30s, on changes and each point; lists drop tables unheard for
+   75s; a table with no match for 10 minutes closes. Protocol version is 2 (T gained state and score).
 4. **Spectating mid-match**: late joiners currently wait for the next START; add a snapshot from the host.
 5. **Extras**: LibDBIcon minimap button, per-character win/loss stats, `/pong invite Name` whisper challenge.
 
@@ -24,6 +26,8 @@ ball will arrive is the skill.
 - First to 7. Hit position sets the exit angle (up to 60 degrees), the ball speeds up per hit up to a cap.
 - Bot runs on the host, is spectatable, Easy/Normal/Hard. Either seated player presses Play Now (3s countdown).
 - Results only in the Pong UI, never chat. No sounds.
+- Lobby: table list with inline Sit/Watch; the table's creator always sits in seat 1; idle tables close after
+  10 minutes; local Practice + Watch Bots stay in the lobby footer.
 - Ask the user design questions as **multiple choice** (AskUserQuestion), never as prose lists.
 
 ## How the simulation works (`Sim.lua`)
@@ -70,7 +74,7 @@ ball will arrive is the skill.
 | `WoWPong/Game.lua` | The current match on this client: seats, bots, authority, match clock (`Game.clock()`), driver frame calling `Game.tick`, `Game.click`, `Game.push` (local events -> `Game.onLocalEvent`), `Game.receive` (remote) |
 | `WoWPong/Net.lua` | Channel join/hide, token-bucket sending (`trySend`, queued `send`), CHAT_MSG_ADDON dispatch to `Net.handlers`, `Net.onUpdate` pump |
 | `WoWPong/Table.lua` | Tables and networked matches: host/join/watch/bot/start/leave, clock sync, event batching, keepalives, timeouts and forfeits, `/pong ping` and `/pong net`, `Table.status()` for the window |
-| `WoWPong/UI.lua` | The window, board, rendering, click-to-move, temp footer controls (incl. Play Now, Stop/Leave), `/pong`, `/pong practice [level]`, `/pong demo [l1] [l2]`, `/pong stop` |
+| `WoWPong/UI.lua` | The window: lobby view (table rows, paging) and table view (board, rendering, click-to-move), mode-dependent footer, `/pong`, `/pong practice [level]`, `/pong demo [l1] [l2]`, `/pong stop` |
 | `tools/fakewow.py` | Fake WoW client (lupa) adapted from AzerothWordle: loads the real files in .toc order; `run(sec, fps)` fires OnUpdate on shown frames, `click_board(y)`, per-client `start_time`, the client's addon-message throttle |
 | `tools/test_net.py` | Several fake clients through a simulated channel with latency/jitter/disconnects: codec, join + clock sync, full matches all clients agree on, 300ms latency, forfeits, host leaving/vanishing, keepalive, bot table, full table, version mismatch, ping |
 | `tools/test_sim.py` | Sim + Bot unit tests, event replay, full bot matches at every level with a balance report |

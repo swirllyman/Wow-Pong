@@ -148,6 +148,61 @@ local function levelLabel()
     return "Bot: " .. Bot.NAMES[ns.db.level or "normal"]
 end
 
+-- The lobby: tables heard on the channel, a row each with Sit / Watch, plus Open a Table.
+local LOBBY_ROWS, ROW_H, LOBBY_TOP = 6, 40, 32
+
+local function buildLobby(frame)
+    local lobby = newFrame("Frame", "WoWPongLobby", frame)
+    ui.lobby = lobby
+    lobby:SetSize(Sim.W, Sim.H)
+    lobby:SetPoint("TOP", frame, "TOP", 0, -HEADER_H)
+    local bg = newRect(lobby, "BACKGROUND", 0, 0, 0, 0.6)
+    bg:SetAllPoints(lobby)
+
+    local title = newText(lobby, 14)
+    title:SetPoint("TOPLEFT", lobby, "TOPLEFT", 8, -8)
+    title:SetTextColor(1, 0.82, 0)
+    title:SetText("Tables")
+    ui.openBtn = newButton(lobby, "Open a Table", 110, function() Table.host() end)
+    ui.openBtn:SetPoint("TOPRIGHT", lobby, "TOPRIGHT", -6, -5)
+
+    ui.rows = {}
+    for i = 1, LOBBY_ROWS do
+        local row = newFrame("Frame", nil, lobby)
+        row:SetSize(Sim.W - 12, ROW_H - 4)
+        row:SetPoint("TOPLEFT", lobby, "TOPLEFT", 6, -LOBBY_TOP - (i - 1) * ROW_H)
+        local rbg = newRect(row, "BACKGROUND", 1, 1, 1, 0.05)
+        rbg:SetAllPoints(row)
+        row.host = newText(row, 13)
+        row.host:SetPoint("TOPLEFT", row, "TOPLEFT", 8, -4)
+        row.host:SetTextColor(1, 0.82, 0)
+        row.detail = newText(row, 11)
+        row.detail:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 8, 5)
+        row.detail:SetTextColor(0.8, 0.8, 0.8)
+        row.watch = newButton(row, "Watch", 60, function() if row.info then Table.spectate(row.info) end end)
+        row.watch:SetPoint("RIGHT", row, "RIGHT", -6, 0)
+        row.sit = newButton(row, "Sit", 50, function() if row.info then Table.sit(row.info) end end)
+        row.sit:SetPoint("RIGHT", row.watch, "LEFT", -4, 0)
+        row:Hide()
+        ui.rows[i] = row
+    end
+
+    ui.empty = newText(lobby, 13)
+    ui.empty:SetPoint("CENTER", lobby, "CENTER", 0, 0)
+    ui.empty:SetTextColor(0.8, 0.8, 0.8)
+    ui.empty:SetText("")
+
+    ui.page = 1
+    ui.pageText = newText(lobby, 11)
+    ui.pageText:SetPoint("BOTTOM", lobby, "BOTTOM", 0, 8)
+    ui.pageText:SetText("")
+    ui.prevBtn = newButton(lobby, "<", 26, function() ui.page = math.max(1, ui.page - 1) ui.lobbyAt = nil end)
+    ui.prevBtn:SetPoint("RIGHT", ui.pageText, "LEFT", -8, 0)
+    ui.nextBtn = newButton(lobby, ">", 26, function() ui.page = ui.page + 1 ui.lobbyAt = nil end)
+    ui.nextBtn:SetPoint("LEFT", ui.pageText, "RIGHT", 8, 0)
+    lobby:Hide()
+end
+
 local function buildFooter(frame)
     ui.practiceBtn = newButton(frame, "Practice vs Bot", 120, function() ui.startPractice() end)
     ui.practiceBtn:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", INSET, 16)
@@ -158,15 +213,49 @@ local function buildFooter(frame)
         end
         ui.levelBtn:SetText(levelLabel())
     end)
-    ui.levelBtn:SetPoint("LEFT", ui.practiceBtn, "RIGHT", 6, 0)
     ui.demoBtn = newButton(frame, "Watch Bots", 100, function() ui.startDemo() end)
     ui.demoBtn:SetPoint("LEFT", ui.levelBtn, "RIGHT", 6, 0)
+    ui.botBtn = newButton(frame, "Add Bot", 90, function()
+        local t = Table.cur
+        if t and t.seats[2] and t.seats[2].bot then Table.removeBot() else Table.addBot(ns.db.level) end
+    end)
+    ui.botBtn:SetPoint("LEFT", ui.levelBtn, "RIGHT", 6, 0)
     ui.stopBtn = newButton(frame, "Stop", 60, function()
-        if Table.cur then Table.leave() else Game.stop() end
+        if Table.cur then Table.leave(true) else Game.stop() end
     end)
     ui.stopBtn:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -INSET, 16)
     ui.playBtn = newButton(frame, "Play Now", 80, function() Table.start() end)
     ui.playBtn:SetPoint("RIGHT", ui.stopBtn, "LEFT", -6, 0)
+end
+
+-- Which buttons show: the lobby (solo options), a table (host/guest/spectator controls), or a local match.
+local function setShown(w, on)
+    if on then w:Show() else w:Hide() end
+end
+
+local function applyMode(mode)
+    local t = Table.cur
+    local isHost = t and t.role == "host"
+    setShown(ui.lobby, mode == "lobby")
+    setShown(ui.board, mode ~= "lobby")
+    setShown(ui.practiceBtn, mode == "lobby")
+    setShown(ui.demoBtn, mode == "lobby")
+    setShown(ui.levelBtn, mode == "lobby" or isHost)
+    setShown(ui.botBtn, isHost)
+    setShown(ui.playBtn, t ~= nil and t.role ~= "spectator")
+    setShown(ui.stopBtn, mode ~= "lobby")
+    ui.levelBtn:ClearAllPoints()
+    if mode == "lobby" then
+        ui.levelBtn:SetPoint("LEFT", ui.practiceBtn, "RIGHT", 6, 0)
+    else
+        ui.levelBtn:SetPoint("BOTTOMLEFT", ui.frame, "BOTTOMLEFT", INSET, 16)
+    end
+    if mode == "lobby" and ui.mode ~= "lobby" then
+        ui.lobbyAt = nil
+        Table.refresh()
+    end
+    ui.mode = mode
+    ui.modeKey = mode .. (t and t.role or "")
 end
 
 local function build()
@@ -217,8 +306,10 @@ local function build()
     end
 
     buildBoard(frame)
+    buildLobby(frame)
     buildFooter(frame)
     frame:SetScript("OnUpdate", function() ui.render(Game.clock()) end)
+    frame:SetScript("OnShow", function() Table.refresh() end)
     frame:Hide()
 end
 
@@ -239,10 +330,60 @@ local function setEnabled(button, on)
     button:SetAlpha(on and 1 or 0.5)
 end
 
+function ui.renderLobby()
+    local now = GetTime()
+    if ui.lobbyAt and now - ui.lobbyAt < 0.5 then return end
+    ui.lobbyAt = now
+    local list = Table.list()
+    local pages = math.max(1, math.ceil(#list / LOBBY_ROWS))
+    ui.page = math.min(ui.page, pages)
+    for i, row in ipairs(ui.rows) do
+        local info = list[(ui.page - 1) * LOBBY_ROWS + i]
+        row.info = info
+        if info then
+            local s1, s2 = info.seats[1], info.seats[2]
+            row.host:SetText(info.hostName .. "'s table")
+            if info.version ~= ns.Net.VERSION then
+                row.detail:SetText("Different WoW Pong version")
+            else
+                row.detail:SetText(string.format("%s vs %s  -  %s", s1 and s1.name or "?",
+                    s2 and s2.name or "(open)", Table.describe(info)))
+            end
+            setEnabled(row.sit, Table.canSit(info))
+            setEnabled(row.watch, info.version == ns.Net.VERSION)
+            row:Show()
+        else
+            row:Hide()
+        end
+    end
+    if #list > 0 then
+        ui.empty:SetText("")
+    elseif ns.Net.channelId() == 0 then
+        ui.empty:SetText("Connecting to the WoW Pong channel...")
+    else
+        ui.empty:SetText("No tables yet. Open one, or practice against a bot.")
+    end
+    ui.pageText:SetText(pages > 1 and (ui.page .. " / " .. pages) or "")
+    setShown(ui.prevBtn, pages > 1)
+    setShown(ui.nextBtn, pages > 1)
+end
+
 function ui.render(now)
+    local mode = (Table.cur or Game.match) and "table" or "lobby"
+    if mode .. (Table.cur and Table.cur.role or "") ~= ui.modeKey then applyMode(mode) end
+    if mode == "lobby" then
+        ui.renderLobby()
+        return
+    end
     local m = Game.match
+    local t = Table.cur
     setEnabled(ui.playBtn, Table.canStart())
-    ui.stopBtn:SetText(Table.cur and "Leave" or "Stop")
+    ui.stopBtn:SetText(t and "Leave" or "Stop")
+    if t and t.role == "host" then
+        local s2 = t.seats[2]
+        ui.botBtn:SetText((s2 and s2.bot) and "Remove Bot" or "Add Bot")
+        setEnabled(ui.botBtn, not (m and Game.networked and m.phase ~= "over") and (not s2 or s2.bot ~= nil))
+    end
     if not m then
         local n1, n2 = Table.names()
         for seat = 1, 2 do
@@ -254,8 +395,8 @@ function ui.render(now)
         ui.names[2]:SetText(n2 or "")
         ui.ball:Hide()
         local status, hint = Table.status()
-        ui.status:SetText(status or "WoW Pong")
-        ui.hint:SetText(hint or "Practice against a bot, or watch two bots play.")
+        ui.status:SetText(status or "")
+        ui.hint:SetText(hint or "")
         return
     end
 
@@ -346,7 +487,7 @@ for _, name in ipairs({ "host", "join", "watch", "bot", "start" }) do
         ui.show()
     end
 end
-table.insert(ns.help, 1, "/pong - open or close the Pong window")
+table.insert(ns.help, 1, "/pong - open the lobby (or close the window)")
 table.insert(ns.help, 2, "/pong practice [easy|normal|hard] - play against a bot")
 table.insert(ns.help, 3, "/pong demo [level] [level] - watch two bots play")
 table.insert(ns.help, 4, "/pong stop - end the current match")

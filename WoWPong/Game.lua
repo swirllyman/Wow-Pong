@@ -16,6 +16,7 @@ Game.auth = nil         -- see Sim.step
 Game.base = 0           -- match time = GetTime() - base (the host's clock, for networked matches)
 Game.networked = false
 Game.onLocalEvent = nil -- function(ev): an event created here was applied (Table broadcasts it)
+Game.onEvent = nil      -- function(ev): any event was applied, local or remote
 
 local driver = CreateFrame("Frame")
 driver:Hide()
@@ -32,6 +33,7 @@ local function onApplied(ev)
         ns.log(string.format("match over: %s %d - %d %s, winner %s%s", Game.names[1] or "?", m.score[1], m.score[2],
             Game.names[2] or "?", Game.names[m.winner] or "?", m.forfeit and " (forfeit)" or ""))
     end
+    if Game.onEvent then Game.onEvent(ev) end
 end
 
 local function created(ev)

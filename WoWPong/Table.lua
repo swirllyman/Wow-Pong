@@ -3,7 +3,9 @@
 --
 -- Messages (fields after the type; pids are Net.pid() ids, "v" is Net.VERSION):
 --   Q;v                                    who's hosting? hosts answer with T
---   T;v;host;hostName;s1pid;s1name;s2pid;s2name   table state (s2pid "bot:<level>" for a bot, "" when free)
+--   T;v;host;hostName;s1pid;s1name;s2pid;s2name;state;score1;score2
+--                                          table state (s2pid "bot:<level>" for a bot, "" when free; state is
+--                                          open / ready / playing / over). Sent on changes, each point, every 30s
 --   J;v;host;pid;name                      ask to sit in seat 2
 --   L;host;pid                             leave the table (a player leaving mid-match forfeits)
 --   X;host                                 host closed the table
@@ -29,6 +31,11 @@ local SYNC_PINGS, SYNC_GAP, SYNC_WAIT = 3, 0.4, 4
 local MOVE_BATCH_AGE = 0.25 -- a lone MOVE waits at most this long for company when tokens are low
 local TOKEN_RESERVE = 4     -- below this many tokens, MOVEs are batched instead of sent at once
 local ROOM = Net.MAX_BYTES - 40
+local ANNOUNCE_EVERY = 30   -- hosts re-send T this often so lobby lists stay fresh
+local EXPIRE = 75           -- a table not announced for this long drops off the list
+local IDLE_CLOSE = 600      -- a table with no match for this long closes itself
+local QUERY_GAP = 15        -- min seconds between our Q requests
+local ANSWER_GAP = 5        -- hosts don't answer a Q if they announced this recently
 
 Table.known = {}   -- host pid -> table info from T messages
 Table.cur = nil    -- the table this client is at
@@ -83,11 +90,27 @@ end
 -- Announcing (host)
 ---------------------------------------------------------------------------
 
+local function tableState(t)
+    local m = Game.networked and Game.match
+    if m and m.phase ~= "over" then return "playing", m end
+    if m then return "over", m end
+    return t.seats[2] and "ready" or "open", nil
+end
+
 local function announce()
     local t = Table.cur
     if not t or t.role ~= "host" then return end
+    local state, m = tableState(t)
     Net.send(Net.msg("T", Net.VERSION, t.host, t.hostName, seatPid(t.seats[1]), seatName(t.seats[1]),
-        seatPid(t.seats[2]), seatName(t.seats[2])))
+        seatPid(t.seats[2]), seatName(t.seats[2]), state, m and m.score[1] or 0, m and m.score[2] or 0))
+    t.lastAnnounce = GetTime()
+    t.announceAt = nil
+end
+
+-- Announces within a second, folding several quick changes into one message.
+local function announceSoon()
+    local t = Table.cur
+    if t and t.role == "host" and not t.announceAt then t.announceAt = GetTime() + 1 end
 end
 
 ---------------------------------------------------------------------------
@@ -137,6 +160,14 @@ function Table.start()
         Net.send(Net.msg("R", t.host, me()))
     end
     return true
+end
+
+-- Hosts re-announce when the score or match state changes, and track idleness.
+Game.onEvent = function(ev)
+    local t = Table.cur
+    if not t or t.role ~= "host" or not Game.networked then return end
+    if ev.type == "START" or ev.type == "MISS" or ev.type == "FORFEIT" then announceSoon() end
+    if ev.type == "START" or Game.match.phase == "over" then t.idleSince = GetTime() end
 end
 
 -- Local events of a networked match wait here until the send policy lets them out.
@@ -199,10 +230,10 @@ function Table.host()
     t.epoch = GetTime()
     t.base = t.epoch
     t.seats[1] = { pid = me(), name = Net.name() }
+    t.idleSince = GetTime()
     Table.cur = t
     announce()
     ns.log("hosting table")
-    say("table open. Others join with |cffffff00/pong join " .. t.hostName .. "|r, or add a bot with /pong bot.")
 end
 
 function Table.addBot(level)
@@ -218,22 +249,58 @@ function Table.addBot(level)
     end
     level = Bot.PROFILES[level or ""] and level or ns.db.level or "normal"
     t.seats[2] = { pid = "bot:" .. level, bot = level, name = "Bot (" .. Bot.NAMES[level] .. ")" }
+    if Game.networked then Game.stop() end   -- the old result belongs to the previous opponent
     announce()
+end
+
+function Table.removeBot()
+    local t = Table.cur
+    if not t or t.role ~= "host" or live() or not (t.seats[2] and t.seats[2].bot) then return end
+    t.seats[2] = nil
+    if Game.networked then Game.stop() end
+    announce()
+end
+
+-- Tables heard from recently, sorted by host name.
+function Table.list()
+    local now, out = GetTime(), {}
+    for host, info in pairs(Table.known) do
+        if now - info.heardAt > EXPIRE then
+            Table.known[host] = nil
+        else
+            out[#out + 1] = info
+        end
+    end
+    table.sort(out, function(a, b) return a.hostName:lower() < b.hostName:lower() end)
+    return out
+end
+
+-- Asks hosts to announce (at most every QUERY_GAP seconds), e.g. when the lobby opens.
+function Table.refresh(force)
+    local now = GetTime()
+    if not force and Table.lastQuery and now - Table.lastQuery < QUERY_GAP then return end
+    if Net.channelId() == 0 then return end
+    Table.lastQuery = now
+    Net.send(Net.msg("Q", Net.VERSION))
+end
+
+-- Whether a lobby row's seat 2 can be taken: free, or a bot between matches.
+function Table.canSit(info)
+    local s2 = info.seats[2]
+    return info.version == Net.VERSION and (not s2 or (s2.bot ~= nil and info.state ~= "playing"))
 end
 
 local function findTable(name)
     name = (name or ""):lower()
-    local found
-    for _, info in pairs(Table.known) do
-        if info.hostName:lower() == name then found = info end
+    for _, info in ipairs(Table.list()) do
+        if info.hostName:lower() == name then return info end
     end
-    return found
 end
 
 local function afterLookup(name, fn)
     local info = findTable(name)
     if info then return fn(info) end
-    Net.send(Net.msg("Q", Net.VERSION))
+    Table.refresh(true)
     say("looking for " .. name .. "'s table...")
     C_Timer.After(2.5, function()
         info = findTable(name)
@@ -248,22 +315,30 @@ local function adopt(info, role)
     return t
 end
 
+-- Sit in seat 2 of a table from the list.
+function Table.sit(info)
+    if info.version ~= Net.VERSION then
+        say(info.hostName .. " runs a different WoW Pong version; update both to play")
+        return
+    end
+    Table.leave(true)
+    Game.stop()
+    Table.cur = adopt(info, "guest")
+    Net.send(Net.msg("J", Net.VERSION, info.host, me(), Net.name()))
+end
+
+function Table.spectate(info)
+    Table.leave(true)
+    Game.stop()
+    Table.cur = adopt(info, "spectator")
+end
+
 function Table.join(name)
     if name == "" then
         say("usage: /pong join <host name>")
         return
     end
-    afterLookup(name, function(info)
-        if info.version ~= Net.VERSION then
-            say(info.hostName .. " runs a different WoW Pong version; update both to play")
-            return
-        end
-        Table.leave(true)
-        Game.stop()
-        Table.cur = adopt(info, "guest")
-        Net.send(Net.msg("J", Net.VERSION, info.host, me(), Net.name()))
-        say("joining " .. info.hostName .. "'s table...")
-    end)
+    afterLookup(name, Table.sit)
 end
 
 function Table.watch(name)
@@ -271,12 +346,7 @@ function Table.watch(name)
         say("usage: /pong watch <host name>")
         return
     end
-    afterLookup(name, function(info)
-        Table.leave(true)
-        Game.stop()
-        Table.cur = adopt(info, "spectator")
-        say("watching " .. info.hostName .. "'s table")
-    end)
+    afterLookup(name, Table.spectate)
 end
 
 -- quiet = true when leaving because we're switching tables (no chat message).
@@ -329,17 +399,21 @@ end
 
 local H = Net.handlers
 
-H.Q = function(f)
+H.Q = function(f, now)
     local t = Table.cur
     if not t or t.role ~= "host" then return end
-    C_Timer.After(math.random() * 1.5, announce)
+    if t.lastAnnounce and now - t.lastAnnounce < ANSWER_GAP then return end
+    C_Timer.After(math.random() * 1.5, function()
+        if Table.cur == t and not (t.lastAnnounce and GetTime() - t.lastAnnounce < ANSWER_GAP) then announce() end
+    end)
 end
 
 H.T = function(f, now)
     local host = f[3]
     if host == me() then return end
-    local info = { version = tonumber(f[2]), host = host, hostName = f[4],
-        seats = { parseSeat(f[5], f[6]), parseSeat(f[7], f[8]) }, heardAt = now }
+    local info = { version = tonumber(f[2]), host = host, hostName = f[4] or "?",
+        seats = { parseSeat(f[5], f[6]), parseSeat(f[7], f[8]) }, heardAt = now,
+        state = f[9] or "open", score = { tonumber(f[10]) or 0, tonumber(f[11]) or 0 } }
     Table.known[host] = info
     local t = Table.cur
     if not t or t.host ~= host or t.role == "host" then return end
@@ -375,6 +449,7 @@ H.J = function(f, now)
         announce()   -- they'll see the seat is taken
         return
     end
+    if not (s2 and s2.pid == pid) and Game.networked and not live() then Game.stop() end   -- new opponent
     t.seats[2] = { pid = pid, name = name }
     t.guestReady = false
     heard(t, pid, now)
@@ -517,6 +592,14 @@ Net.onUpdate = function(now)
             t.seats[2] = nil
             announce()
         end
+        if not live() and now - t.idleSince > IDLE_CLOSE then
+            Table.leave(true)
+            say("your table closed after " .. math.floor(IDLE_CLOSE / 60) .. " minutes without a match")
+            return
+        end
+        if (t.announceAt and now >= t.announceAt) or now - (t.lastAnnounce or 0) >= ANNOUNCE_EVERY then
+            announce()
+        end
     elseif now - (t.lastHeard[t.host] or now) > TIMEOUT then
         forfeit(t, 1, "host went quiet")
         say(t.hostName .. "'s table is gone (no word for " .. TIMEOUT .. "s)")
@@ -534,7 +617,7 @@ function Table.status()
     if not t then return nil end
     local s2 = t.seats[2]
     if t.role == "host" then
-        if not s2 then return "Waiting for an opponent", "They type /pong join " .. t.hostName .. " (or /pong bot)" end
+        if not s2 then return "Waiting for an opponent", "Anyone can sit down from the lobby, or add a bot" end
         if not s2.bot and not t.guestReady then return "Syncing with " .. s2.name .. "...", "" end
         return "Ready", "Press Play Now"
     elseif t.role == "guest" then
@@ -550,16 +633,24 @@ function Table.names()
     return seatName(t.seats[1]), seatName(t.seats[2])
 end
 
-function Table.list()
-    local n = 0
-    for _, info in pairs(Table.known) do
-        n = n + 1
+-- One-line summary of a listed table's state, e.g. "Playing 3-2".
+function Table.describe(info)
+    local s = info.score
+    if info.state == "playing" then return string.format("Playing %d-%d", s[1], s[2]) end
+    if info.state == "over" then return string.format("Finished %d-%d", s[1], s[2]) end
+    if info.state == "ready" then return "Ready" end
+    return "Open seat"
+end
+
+local function printList()
+    local list = Table.list()
+    for _, info in ipairs(list) do
         local s2 = info.seats[2]
-        say(string.format("  %s's table: %s vs %s", info.hostName, seatName(info.seats[1]),
-            s2 and s2.name or "(open)"))
+        say(string.format("  %s's table: %s vs %s - %s", info.hostName, seatName(info.seats[1]),
+            s2 and s2.name or "(open)", Table.describe(info)))
     end
-    if n == 0 then say("no tables seen yet") end
-    Net.send(Net.msg("Q", Net.VERSION))
+    if #list == 0 then say("no tables seen yet") end
+    Table.refresh(true)
 end
 
 ---------------------------------------------------------------------------
@@ -572,7 +663,7 @@ ns.commands.watch = function(arg) Table.watch(arg) end
 ns.commands.bot = function(arg) Table.addBot(arg:lower()) end
 ns.commands.start = function() Table.start() end
 ns.commands.leave = function() Table.leave() end
-ns.commands.tables = function() Table.list() end
+ns.commands.tables = function() printList() end
 ns.commands.ping = function() Table.ping() end
 ns.commands.net = function()
     local s = Net.stats

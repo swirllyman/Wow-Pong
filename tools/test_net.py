@@ -341,6 +341,136 @@ def test_practice_leaves_table():
     check(a.ns.Table.cur.seats[2] is None, "host sees the seat free again")
 
 
+def show(c):
+    f = c.frame("WoWPongFrame")
+    f.Show(f)
+    c.run(0.6)
+    return c.ns._ui
+
+
+def enabled(button):
+    return not button.disabled
+
+
+def rows(ui):
+    return [r for r in ui.rows.values() if r.shownFlag]
+
+
+def test_lobby():
+    net, (a, b, c, d) = setup(n=4)
+    ua = show(a)
+    ua.openBtn.scripts.OnClick(ua.openBtn)
+    net.run(1)
+    ua = show(a)
+    check(a.ns.Table.cur.role == "host" and ua.board.shownFlag and not ua.lobby.shownFlag,
+          "Open a Table switches to the table view")
+    check(ua.botBtn.shownFlag and ua.levelBtn.shownFlag and not ua.practiceBtn.shownFlag, "host footer: bot controls")
+    check(ua.status.text == "Waiting for an opponent", "host waits for an opponent")
+
+    ub = show(b)
+    r = rows(ub)
+    check(len(r) == 1 and r[0].host.text == "Alice's table", "Bob's lobby lists Alice's table")
+    check("Alice vs (open)" in r[0].detail.text and "Open seat" in r[0].detail.text, "row shows the open seat")
+    check(enabled(r[0].sit) and enabled(r[0].watch), "Sit and Watch enabled")
+    r[0].sit.scripts.OnClick(r[0].sit)
+    net.run(4)
+    ub = show(b)
+    check(b.ns.Table.mySeat() == 2 and ub.board.shownFlag, "Sit puts Bob in seat 2 and shows the table")
+    check(ub.playBtn.shownFlag and enabled(ub.playBtn) and not ub.botBtn.shownFlag, "guest footer: Play Now, no bot")
+    check(ub.stopBtn.text == "Leave", "guest can leave")
+
+    uc = show(c)
+    net.run(1)
+    uc = show(c)
+    r = rows(uc)
+    check(len(r) == 1 and "Alice vs Bob" in r[0].detail.text and "Ready" in r[0].detail.text, "full table is Ready")
+    check(not enabled(r[0].sit) and enabled(r[0].watch), "can't sit at a full table, can watch")
+    r[0].watch.scripts.OnClick(r[0].watch)
+    net.run(1)
+    uc = show(c)
+    check(c.ns.Table.cur.role == "spectator" and not uc.playBtn.shownFlag, "Watch spectates, no Play Now")
+
+    ud = show(d)
+    ub.playBtn.scripts.OnClick(ub.playBtn)
+    pilot(a, "hard")
+    pilot(b, "easy")
+    net.until(lambda: match_of(a) is not None and match_of(a).score[1] + match_of(a).score[2] >= 2, 120)
+    net.run(3)
+    ud = show(d)
+    r = rows(ud)
+    import re
+    live_score = re.search(r"Playing (\d+)-(\d+)", r[0].detail.text) if r else None
+    check(live_score is not None and int(live_score.group(1)) + int(live_score.group(2)) >= 2,
+          "lobby shows the live score: %s" % (r[0].detail.text if r else None))
+    check(not enabled(r[0].sit) and enabled(r[0].watch), "can watch a match in progress")
+    net.until(lambda: over(a), 600)
+    net.run(3)
+    ud = show(d)
+    check("Finished" in rows(ud)[0].detail.text, "lobby shows the final score")
+
+    # Leaving puts Bob back in the lobby; the host's bot button works.
+    ub.stopBtn.scripts.OnClick(ub.stopBtn)
+    net.run(1)
+    ub = show(b)
+    check(b.ns.Table.cur is None and ub.lobby.shownFlag, "Leave returns to the lobby")
+    ua = show(a)
+    check(enabled(ua.botBtn) and ua.botBtn.text == "Add Bot", "host can add a bot once the seat is free")
+    ua.botBtn.scripts.OnClick(ua.botBtn)
+    ua = show(a)
+    check(a.ns.Table.cur.seats[2].bot is not None and ua.botBtn.text == "Remove Bot", "Add Bot seats a bot")
+    net.run(2)
+    ub = show(b)
+    r = rows(ub)
+    check(enabled(r[0].sit), "a bot's seat can be taken between matches")
+    ua.botBtn.scripts.OnClick(ua.botBtn)
+    check(a.ns.Table.cur.seats[2] is None, "Remove Bot frees the seat")
+    check(not errors((a, b, c, d)), "no errors: %s" % errors((a, b, c, d))[:3])
+
+
+def test_lobby_freshness():
+    net, (a, d) = setup(n=2)
+    a.slash("host")
+    net.run(200)
+    ud = show(d)
+    check(len(rows(ud)) == 1, "periodic announcements keep the table listed (200s, no queries)")
+    sent_before = a.ns.Net.stats.sent
+    net.run(60)
+    check(a.ns.Net.stats.sent - sent_before <= 25, "an idle table costs few messages (%d/min)"
+          % (a.ns.Net.stats.sent - sent_before))
+    net.cut.add(a)
+    net.run(80)
+    ud = show(d)
+    check(len(rows(ud)) == 0, "a vanished host's table drops off the list")
+
+    net2, (e, f) = setup(n=2)
+    e.slash("host")
+    net2.run(590)
+    check(e.ns.Table.cur is not None, "table still open before 10 minutes")
+    net2.run(15)
+    check(e.ns.Table.cur is None, "table closes after 10 minutes without a match")
+    check(any("10 minutes" in l for l in e.chat()), "host told why")
+    uf = show(f)
+    check(len(rows(uf)) == 0, "closed table leaves others' lists at once")
+
+
+def test_lobby_pages_and_versions():
+    c = Client()
+    c.run(6)
+    for i in range(8):
+        c.fire("CHAT_MSG_ADDON", "WoWPong", "T;2;9-%04d;Host%d;9-%04d;Host%d;;;open;0;0" % (i, i, i, i),
+               "CHANNEL", "x", "", 0, 5)
+    c.fire("CHAT_MSG_ADDON", "WoWPong", "T;1;9-9999;Zed;9-9999;Zed;;", "CHANNEL", "Zed", "", 0, 5)
+    ui = show(c)
+    check(len(rows(ui)) == 6 and ui.pageText.text == "1 / 2", "9 tables: 6 per page, 2 pages")
+    ui.nextBtn.scripts.OnClick(ui.nextBtn)
+    c.run(0.6)
+    r = rows(ui)
+    check(len(r) == 3 and ui.pageText.text == "2 / 2", "second page holds the rest")
+    zed = [x for x in r if x.host.text == "Zed's table"]
+    check(zed and "Different WoW Pong version" in zed[0].detail.text, "old-version table marked")
+    check(zed and not enabled(zed[0].sit) and not enabled(zed[0].watch), "old-version table can't be joined")
+
+
 if __name__ == "__main__":
     test_codec()
     test_join_sync_and_match()
@@ -353,6 +483,9 @@ if __name__ == "__main__":
     test_full_table_and_versions()
     test_ping_and_tables()
     test_practice_leaves_table()
+    test_lobby()
+    test_lobby_freshness()
+    test_lobby_pages_and_versions()
     if failures:
         print("%d FAILED" % failures)
         sys.exit(1)

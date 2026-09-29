@@ -12,7 +12,7 @@ ns.Net = Net
 
 Net.PREFIX = "WoWPong"
 Net.CHANNEL = "WoWPongLobby"
-Net.VERSION = 1
+Net.VERSION = 2
 Net.MAX_BYTES = 255
 
 local BURST, REGEN = 8, 0.9       -- our token bucket: capacity, tokens per second

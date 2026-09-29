@@ -26,7 +26,14 @@ def test_window():
     c.slash("")
     check(frame.IsShown(frame), "/pong opens the window")
     c.run(0.2)
-    check(c.ns._ui.status.text == "WoW Pong", "idle board shows the title")
+    ui = c.ns._ui
+    check(ui.lobby.shownFlag and not ui.board.shownFlag, "opens on the lobby")
+    check("Connecting" in ui.empty.text, "lobby says it's still connecting before the channel is joined")
+    check(ui.practiceBtn.shownFlag and ui.demoBtn.shownFlag and not ui.playBtn.shownFlag,
+          "lobby footer offers practice and bot demo")
+    c.run(6)
+    c.run(0.6)
+    check("No tables yet" in ui.empty.text, "empty lobby invites you to open a table")
     c.slash("")
     check(not frame.IsShown(frame), "/pong again closes it")
     check("WoWPongFrame" in list(c.lua.globals().UISpecialFrames.values()), "Esc closes the window")
