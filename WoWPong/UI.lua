@@ -150,6 +150,7 @@ end
 
 -- The lobby: tables heard on the channel, a row each with Sit / Watch, plus Open a Table.
 local LOBBY_ROWS, ROW_H, LOBBY_TOP = 6, 40, 32
+local STATS_LINES = 13
 
 local function buildLobby(frame)
     local lobby = newFrame("Frame", "WoWPongLobby", frame)
@@ -159,12 +160,28 @@ local function buildLobby(frame)
     local bg = newRect(lobby, "BACKGROUND", 0, 0, 0, 0.6)
     bg:SetAllPoints(lobby)
 
-    local title = newText(lobby, 14)
-    title:SetPoint("TOPLEFT", lobby, "TOPLEFT", 8, -8)
-    title:SetTextColor(1, 0.82, 0)
-    title:SetText("Tables")
+    ui.lobbyTitle = newText(lobby, 14)
+    ui.lobbyTitle:SetPoint("TOPLEFT", lobby, "TOPLEFT", 8, -8)
+    ui.lobbyTitle:SetTextColor(1, 0.82, 0)
+    ui.lobbyTitle:SetText("Tables")
     ui.openBtn = newButton(lobby, "Open a Table", 110, function() Table.host() end)
     ui.openBtn:SetPoint("TOPRIGHT", lobby, "TOPRIGHT", -6, -5)
+    ui.statsBtn = newButton(lobby, "Stats", 60, function()
+        ui.showingStats = not ui.showingStats
+        ui.lobbyAt = nil
+    end)
+    ui.statsBtn:SetPoint("RIGHT", ui.openBtn, "LEFT", -6, 0)
+
+    -- Stats panel, drawn over the table rows.
+    ui.statsLines = {}
+    for i = 1, STATS_LINES do
+        local fs = newText(lobby, 12)
+        fs:SetPoint("TOPLEFT", lobby, "TOPLEFT", 14, -LOBBY_TOP - 4 - (i - 1) * 20)
+        fs:SetJustifyH("LEFT")
+        fs:SetTextColor(0.9, 0.9, 0.9)
+        fs:SetText("")
+        ui.statsLines[i] = fs
+    end
 
     ui.rows = {}
     for i = 1, LOBBY_ROWS do
@@ -258,7 +275,45 @@ local function applyMode(mode)
     ui.modeKey = mode .. (t and t.role or "")
 end
 
+-- Invite popup: "X challenges you to Pong!" with Accept / Decline; disappears unanswered after a while.
+local function buildInvite()
+    local pop = newFrame("Frame", "WoWPongInvite", UIParent, "BackdropTemplate")
+    ui.invite = pop
+    pop:SetSize(300, 96)
+    pop:SetFrameStrata("DIALOG")
+    pop:SetPoint("TOP", UIParent, "TOP", 0, -140)
+    pop:EnableMouse(true)
+    styleAsPanel(pop)
+    pop.text = newText(pop, 13)
+    pop.text:SetPoint("TOP", pop, "TOP", 0, -22)
+    pop.text:SetTextColor(1, 0.82, 0)
+    pop.text:SetText("")
+    pop.accept = newButton(pop, "Accept", 90, function()
+        pop:Hide()
+        if pop.onAccept then pop.onAccept() end
+    end)
+    pop.accept:SetPoint("BOTTOMRIGHT", pop, "BOTTOM", -6, 18)
+    pop.decline = newButton(pop, "Decline", 90, function()
+        pop:Hide()
+        if pop.onDecline then pop.onDecline() end
+    end)
+    pop.decline:SetPoint("BOTTOMLEFT", pop, "BOTTOM", 6, 18)
+    pop:SetScript("OnUpdate", function(self)
+        if GetTime() >= (self.expires or 0) then self:Hide() end
+    end)
+    pop:Hide()
+end
+
+function ui.showInvite(text, wait, onAccept, onDecline)
+    local pop = ui.invite
+    pop.text:SetText(text)
+    pop.onAccept, pop.onDecline = onAccept, onDecline
+    pop.expires = GetTime() + wait
+    pop:Show()
+end
+
 local function build()
+    buildInvite()
     local frame = newFrame("Frame", "WoWPongFrame", UIParent, "BackdropTemplate")
     ui.frame = frame
     frame:SetSize(FRAME_W, FRAME_H)
@@ -330,10 +385,26 @@ local function setEnabled(button, on)
     button:SetAlpha(on and 1 or 0.5)
 end
 
+local function renderStats()
+    local lines = ns.Stats.lines()
+    for i, fs in ipairs(ui.statsLines) do fs:SetText(lines[i] or "") end
+    for _, row in ipairs(ui.rows) do row:Hide() end
+    ui.empty:SetText("")
+    ui.pageText:SetText("")
+    setShown(ui.prevBtn, false)
+    setShown(ui.nextBtn, false)
+    ui.statsBtn:SetText("Tables")
+    ui.lobbyTitle:SetText("Your stats")
+end
+
 function ui.renderLobby()
     local now = GetTime()
     if ui.lobbyAt and now - ui.lobbyAt < 0.5 then return end
     ui.lobbyAt = now
+    if ui.showingStats then return renderStats() end
+    ui.statsBtn:SetText("Stats")
+    ui.lobbyTitle:SetText("Tables")
+    for _, fs in ipairs(ui.statsLines) do fs:SetText("") end
     local list = Table.list()
     local pages = math.max(1, math.ceil(#list / LOBBY_ROWS))
     ui.page = math.min(ui.page, pages)
@@ -480,7 +551,7 @@ ns.commands.demo = function(arg)
 end
 ns.commands.stop = function() Game.stop() end
 -- Table commands open the window too.
-for _, name in ipairs({ "host", "join", "watch", "bot", "start" }) do
+for _, name in ipairs({ "host", "join", "watch", "bot", "start", "invite" }) do
     local fn = ns.commands[name]
     ns.commands[name] = function(arg)
         fn(arg)

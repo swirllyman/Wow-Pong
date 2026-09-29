@@ -88,6 +88,8 @@ ns.on("ADDON_LOADED", function(name)
     WoWPongDB = WoWPongDB or {}
     ns.db = WoWPongDB
     ns.db.log = ns.db.log or {}
+    WoWPongCharDB = WoWPongCharDB or {}   -- per character: stats
+    ns.cdb = WoWPongCharDB
     for _, line in ipairs(pendingLog) do ns.db.log[#ns.db.log + 1] = line end
     pendingLog = {}
     for _, fn in ipairs(ns.onLoaded) do fn() end

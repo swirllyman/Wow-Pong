@@ -211,6 +211,7 @@ function UnitGUID(u)
     if u == "target" and TARGET then return TARGET.guid end
 end
 function UnitIsPlayer(u) return u == "target" and TARGET ~= nil end
+function UnitExists(u) return u == "player" or (u == "target" and TARGET ~= nil) end
 function GetPlayerInfoByGUID(guid)
     local who = guid == ME.guid and ME or (TARGET and TARGET.guid == guid and TARGET) or PEERS[guid]
     if who then return "Mage", "MAGE", "Human", "Human", 2, who.name, "" end
@@ -292,18 +293,27 @@ class Client:
     """One fake WoW client running the real addon."""
 
     def __init__(self, name="John", guid="Player-1-0001", realm="Forever", secret_name=False, surname=None,
-                 start_time=1000):
+                 start_time=1000, preload=None):
+        """preload: Lua run before the addon files, e.g. stub libraries (the real Libs/ are third-party code
+        that needs much more of the WoW API than this fake has, so they're never loaded)."""
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         self.lua.execute(FAKE_WOW)
         g = self.lua.globals()
         g.now = start_time   # each client's GetTime() has its own origin, like real machines
+        # Reproducible randomness per client; set WOWPONG_SEED to explore other runs.
+        seed = int(os.environ.get("WOWPONG_SEED", "0")) * 7919 + sum(ord(ch) * (i + 1) for i, ch in enumerate(name))
+        g.math.randomseed(seed)
         g.ME.name, g.ME.guid, g.ME.nrealm, g.ME.secretName = name, guid, realm, secret_name
         g.ME.surname = surname
         self.name, self.guid = name, guid
+        if preload:
+            self.lua.execute(preload)
         ns = self.lua.table()
         loader = self.lua.execute("return function(src, name, ns) return load(src, name) end")
         for f in self.toc_files():
-            path = os.path.join(ADDON_DIR, f)
+            if f.replace("\\", "/").startswith("Libs/"):
+                continue
+            path = os.path.join(ADDON_DIR, *f.replace("\\", "/").split("/"))
             with open(path, encoding="utf-8") as fh:
                 src = fh.read()
             chunk = loader(src, "@" + f, ns)

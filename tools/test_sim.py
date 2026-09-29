@@ -175,7 +175,9 @@ def test_step_authority(lua, ns):
     m2 = Sim.newMatch()
     Sim.apply(m2, ev(lua, type="FORFEIT", t=1, seat=2))
     check(m2.phase == "over" and m2.winner == 1 and m2.forfeit, "forfeit ends the match")
-    check(not Sim.apply(m2, ev(lua, type="MOVE", t=2, seat=1, y=10)), "no events after the match is over")
+    check(not Sim.apply(m2, ev(lua, type="SERVE", t=2, dir=1, angle=0)), "no play after the match is over")
+    check(Sim.apply(m2, ev(lua, type="MOVE", t=2, seat=1, y=10)) and m2.phase == "over",
+          "a late-arriving move still lands after the match (paddles stay in sync)")
 
 
 def test_replay(lua, ns):

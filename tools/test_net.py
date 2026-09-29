@@ -188,7 +188,9 @@ def test_join_sync_and_match():
     check(all(throttled(x) == 0 for x in (a, b, c)), "the client never dropped a message for throttling")
     gaps = [l for x in (a, b, c) for l in x.log() if "seq gap" in l]
     check(not gaps, "no lost messages")
-    # Spectator saw paddles where the players put them (compare final paddle targets).
+    # Spectator saw paddles where the players put them (compare final paddle targets, once moves batched just
+    # before the last point have arrived).
+    net.run(3)
     same_paddles = all(abs(match_of(c).paddles[s].target - ma.paddles[s].target) < 1e-9 for s in (1, 2))
     check(same_paddles, "spectator's paddles match the players'")
     c.frame("WoWPongFrame").Show(c.frame("WoWPongFrame"))
@@ -533,6 +535,7 @@ def test_late_spectator():
     net.until(lambda: over(a) and over(b) and over(c) and over(d), 600)
     check(score(a) == score(b) == score(c) == score(d), "late spectators agree on the final result %s / %s"
           % (score(a), score(c)))
+    net.run(3)
     ma, mc = match_of(a), match_of(c)
     same = all(abs(mc.paddles[s].target - ma.paddles[s].target) < 0.01 for s in (1, 2))
     check(same, "late spectator's paddles end where the players' do")
@@ -540,9 +543,12 @@ def test_late_spectator():
     check(not gaps, "no gaps after catching up: %s" % gaps[:2])
 
     # Next match starts normally for them.
-    a.slash("start")
+    started = a.ns.Table.start()
     net.run(2)
-    check(match_of(c).phase in ("countdown", "play") and c.ns.Table.cur.matchNo == 2, "rematch reaches them")
+    check(match_of(c).phase in ("countdown", "play") and c.ns.Table.cur.matchNo == 2,
+          "rematch reaches them (host started: %s, host match %s, Cara at match %s/%s, host queue %d, tokens %.1f)"
+          % (started, a.ns.Table.cur.matchNo, c.ns.Table.cur.matchNo, match_of(c).phase, a.ns.Net.queued(),
+             a.ns.Net.tokens()))
     check(not errors((a, b, c, d)), "no errors: %s" % errors((a, b, c, d))[:3])
 
 

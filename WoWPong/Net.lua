@@ -46,6 +46,14 @@ function Net.name()
     return (name:gsub("[;|,]", ""))
 end
 
+-- "First Surname" when the character has a surname (UnitName's second value on Forever), else the first name.
+function Net.fullName()
+    local name, surname = UnitName("player")
+    if not name or ns.isSecret(name) then return "?" end
+    if surname and not ns.isSecret(surname) and surname ~= "" then name = name .. " " .. surname end
+    return (name:gsub("[;|,]", ""))
+end
+
 ---------------------------------------------------------------------------
 -- Channel
 ---------------------------------------------------------------------------
@@ -163,12 +171,37 @@ function Net.flush()
     while queue[1] and Net.trySend(queue[1]) do table.remove(queue, 1) end
 end
 
+-- Low priority (table announcements, keepalives, queries, pings): sent only when the normal queue is empty and a
+-- token would still be left for match events, so they never delay a hit or a serve. A newer message with the same
+-- key replaces a queued one (e.g. only the latest table state matters).
+local lowQueue = {}   -- { text, key }
+local LOW_MIN_TOKENS = 2
+
+function Net.sendLow(text, key)
+    if key then
+        for _, item in ipairs(lowQueue) do
+            if item.key == key then
+                item.text = text
+                return
+            end
+        end
+    end
+    lowQueue[#lowQueue + 1] = { text = text, key = key }
+    Net.flushLow()
+end
+
+function Net.flushLow()
+    while lowQueue[1] and not queue[1] and Net.tokens() >= LOW_MIN_TOKENS and Net.trySend(lowQueue[1].text) do
+        table.remove(lowQueue, 1)
+    end
+end
+
 function Net.tokens()
     refill(GetTime())
     return tokens
 end
 
-function Net.queued() return #queue end
+function Net.queued() return #queue + #lowQueue end
 function Net.idleFor() return GetTime() - lastSentAt end
 
 -- Joins fields into a message.
@@ -195,6 +228,7 @@ local pump = CreateFrame("Frame")
 pump:SetScript("OnUpdate", function()
     Net.flush()
     if Net.onUpdate then Net.onUpdate(GetTime()) end
+    Net.flushLow()
 end)
 
 local firstWorld = true

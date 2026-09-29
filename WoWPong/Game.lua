@@ -17,6 +17,8 @@ Game.base = 0           -- match time = GetTime() - base (the host's clock, for 
 Game.networked = false
 Game.onLocalEvent = nil -- function(ev): an event created here was applied (Table broadcasts it)
 Game.onEvent = nil      -- function(ev): any event was applied, local or remote
+Game.onOver = nil       -- function(match): a match this client played in ended (Stats records it)
+Game.opponent = nil     -- who the local human faces: { kind = "human", pid, name } or { kind = "bot", level }
 
 local driver = CreateFrame("Frame")
 driver:Hide()
@@ -32,6 +34,7 @@ local function onApplied(ev)
     if m.phase == "over" and (ev.type == "MISS" or ev.type == "FORFEIT") then
         ns.log(string.format("match over: %s %d - %d %s, winner %s%s", Game.names[1] or "?", m.score[1], m.score[2],
             Game.names[2] or "?", Game.names[m.winner] or "?", m.forfeit and " (forfeit)" or ""))
+        if Game.humanSeat and Game.onOver then Game.onOver(m) end
     end
     if Game.onEvent then Game.onEvent(ev) end
 end
@@ -43,11 +46,13 @@ end
 
 -- Starts a new match. opts = {
 --   names = { name1, name2 }, seats = { [seat] = true if this client judges it }, host = bool,
---   humanSeat = seat or nil, bots = { [seat] = level }, base = clock base, networked = bool }
+--   humanSeat = seat or nil, bots = { [seat] = level }, base = clock base, networked = bool,
+--   opponent = see Game.opponent }
 function Game.begin(opts)
     Game.match = Sim.newMatch()
     Game.names = opts.names
     Game.humanSeat = opts.humanSeat
+    Game.opponent = opts.opponent
     Game.bots = {}
     for seat, level in pairs(opts.bots or {}) do Game.bots[#Game.bots + 1] = Bot.new(seat, level, math.random) end
     Game.networked = opts.networked or false
@@ -70,13 +75,15 @@ function Game.startLocal(seatDefs)
             names[seat] = ns.show((UnitName("player")))
         end
     end
-    Game.begin({ names = names, seats = { true, true }, host = true, humanSeat = humanSeat, bots = bots })
+    local opponent = humanSeat and bots[3 - humanSeat] and { kind = "bot", level = bots[3 - humanSeat] } or nil
+    Game.begin({ names = names, seats = { true, true }, host = true, humanSeat = humanSeat, bots = bots,
+        opponent = opponent })
     Game.push({ type = "START", t = Game.clock() })
     ns.log("local match: " .. names[1] .. " vs " .. names[2])
 end
 
 function Game.stop()
-    Game.match, Game.bots, Game.humanSeat, Game.networked = nil, {}, nil, false
+    Game.match, Game.bots, Game.humanSeat, Game.networked, Game.opponent = nil, {}, nil, false, nil
     driver:Hide()
 end
 

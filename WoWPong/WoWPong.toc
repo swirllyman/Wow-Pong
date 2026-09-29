@@ -3,7 +3,15 @@
 ## Notes: 1v1 click-to-move Pong with spectators. (/pong)
 ## Author: Joe Greive
 ## Version: @project-version@
+## IconTexture: Interface\AddOns\WoWPong\Media\icon
 ## SavedVariables: WoWPongDB
+## SavedVariablesPerCharacter: WoWPongCharDB
+## AddonCompartmentFunc: WoWPong_OnCompartmentClick
+
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
+Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
 
 Core.lua
 Codec.lua
@@ -12,4 +20,7 @@ Bot.lua
 Game.lua
 Net.lua
 Table.lua
+Stats.lua
+Invite.lua
 UI.lua
+Minimap.lua

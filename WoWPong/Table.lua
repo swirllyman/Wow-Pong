@@ -107,8 +107,8 @@ local function announce()
     local t = Table.cur
     if not t or t.role ~= "host" then return end
     local state, m = tableState(t)
-    Net.send(Net.msg("T", Net.VERSION, t.host, t.hostName, seatPid(t.seats[1]), seatName(t.seats[1]),
-        seatPid(t.seats[2]), seatName(t.seats[2]), state, m and m.score[1] or 0, m and m.score[2] or 0))
+    Net.sendLow(Net.msg("T", Net.VERSION, t.host, t.hostName, seatPid(t.seats[1]), seatName(t.seats[1]),
+        seatPid(t.seats[2]), seatName(t.seats[2]), state, m and m.score[1] or 0, m and m.score[2] or 0), "T")
     t.lastAnnounce = GetTime()
     t.announceAt = nil
 end
@@ -132,7 +132,15 @@ local function beginMatch(t, matchNo)
     local mySeat = Table.mySeat()
     local s2 = t.seats[2]
     local host = t.role == "host"
+    local opponent
+    local other = mySeat and t.seats[3 - mySeat]
+    if other and other.bot then
+        opponent = { kind = "bot", level = other.bot }
+    elseif other then
+        opponent = { kind = "human", pid = other.pid, name = other.name }
+    end
     Game.begin({
+        opponent = opponent,
         names = { seatName(t.seats[1]), seatName(s2) },
         seats = { host, (host and s2 and s2.bot ~= nil) or (mySeat == 2) },
         host = host,
@@ -288,7 +296,7 @@ function Table.refresh(force)
     if not force and Table.lastQuery and now - Table.lastQuery < QUERY_GAP then return end
     if Net.channelId() == 0 then return end
     Table.lastQuery = now
-    Net.send(Net.msg("Q", Net.VERSION))
+    Net.sendLow(Net.msg("Q", Net.VERSION), "Q")
 end
 
 -- Whether a lobby row's seat 2 can be taken: free, or a bot between matches.
@@ -384,6 +392,10 @@ function Table.leave(quiet)
         flushEvents(t, math.huge)
         Net.send(Net.msg("X", t.host))
     elseif t.role == "guest" then
+        -- Leaving mid-match forfeits: the host announces it; record it here too.
+        if live() and Table.mySeat() then
+            Game.receive({ type = "FORFEIT", t = Game.clock(), seat = Table.mySeat() })
+        end
         Net.send(Net.msg("L", t.host, me()))
     end
     if Game.networked then Game.stop() end
@@ -672,7 +684,7 @@ Net.onUpdate = function(now)
     flushEvents(t, now)
     local seated = t.role == "host" or Table.mySeat() ~= nil
     if seated and Net.idleFor() >= KEEPALIVE and Net.queued() == 0 then
-        Net.send(Net.msg("K", t.host, me()))
+        Net.sendLow(Net.msg("K", t.host, me()), "K")
     end
     if t.role == "host" then
         local s2 = t.seats[2]

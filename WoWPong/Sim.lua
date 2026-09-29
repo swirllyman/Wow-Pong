@@ -181,10 +181,11 @@ function Sim.restore(m, s)
     m.trajectory = m.trajectory + 1
 end
 
--- Applies one event. Returns false for an unknown type or once the match is over (nothing changes then).
+-- Applies one event. Returns false for an unknown type or once the match is over (nothing changes then), except
+-- MOVE: a move batched just before the final miss can arrive after it, and only touches that player's paddle.
 function Sim.apply(m, ev)
     local fn = apply[ev.type]
-    if not fn or (m.phase == "over" and ev.type ~= "START") then return false end
+    if not fn or (m.phase == "over" and ev.type ~= "START" and ev.type ~= "MOVE") then return false end
     fn(m, ev)
     m.events[#m.events + 1] = ev
     return true
