@@ -7,6 +7,7 @@
 ## SavedVariables: WoWPongDB
 ## SavedVariablesPerCharacter: WoWPongCharDB
 ## AddonCompartmentFunc: WoWPong_OnCompartmentClick
+## X-Curse-Project-ID: 1718303
 
 Libs\LibStub\LibStub.lua
 Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua

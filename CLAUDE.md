@@ -165,6 +165,10 @@ All planned steps are built. Next: real in-game testing with a guildmate, then t
 
 ## Working on it
 
+- **Releases:** push a tag like `v1.0.0`; `.github/workflows/release.yml` runs the BigWigs packager (`.pkgmeta`
+  packages only `WoWPong/`) and uploads to CurseForge project 1718303 (`X-Curse-Project-ID` in the .toc) plus a
+  GitHub release. Needs the repo secret `CF_API_KEY`. Dry run: `bash release.sh -d -z -r <abs dir>`.
+
 - **Game install:** `C:\Program Files (x86)\World of Warcraft\_classic_beta_\`. `Interface\AddOns\WoWPong` is a
   **junction** to this project's `WoWPong/`, so edits are live. `/reload` picks up Lua changes; new files need a
   full client restart.

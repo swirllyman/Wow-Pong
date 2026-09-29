@@ -1,0 +1,11 @@
+# BigWigs packager config (https://github.com/BigWigsMods/packager). The addon lives in WoWPong/; everything else
+# in the repo is development material and stays out of the zip.
+package-as: WoWPong
+
+move-folders:
+  WoWPong/WoWPong: WoWPong
+
+ignore:
+  - tools
+  - CLAUDE.md
+  - README.md
