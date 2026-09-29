@@ -6,7 +6,10 @@
 ## SavedVariables: WoWPongDB
 
 Core.lua
+Codec.lua
 Sim.lua
 Bot.lua
 Game.lua
+Net.lua
+Table.lua
 UI.lua

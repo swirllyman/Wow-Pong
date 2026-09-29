@@ -184,7 +184,8 @@ end
 
 -- Creates, applies and returns the events this client is responsible for at time `now`:
 -- the host serves, and each locally owned seat judges the ball reaching its own paddle.
--- auth = { seats = { [1] = bool, [2] = bool }, host = bool, rand = function() -> [0, 1) }
+-- auth = { seats = { [1] = bool, [2] = bool }, host = bool, rand = function() -> [0, 1),
+--          normalize = optional function(ev) -> ev, applied before the event (networked matches round it) }
 function Sim.step(m, now, auth)
     local out = {}
     for _ = 1, 20 do   -- bounded catch-up after a long frame
@@ -197,6 +198,7 @@ function Sim.step(m, now, auth)
             if auth.seats[seat] and now >= t then ev = Sim.judge(m, seat) end
         end
         if not ev then break end
+        if auth.normalize then ev = auth.normalize(ev) end
         Sim.apply(m, ev)
         out[#out + 1] = ev
     end

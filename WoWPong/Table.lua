@@ -1,0 +1,586 @@
+-- Tables: networked play over the lobby channel. A host opens a table and sits in seat 1; one guest (or a bot run
+-- by the host) takes seat 2; anyone can watch. Everything travels on the channel, so spectators just listen.
+--
+-- Messages (fields after the type; pids are Net.pid() ids, "v" is Net.VERSION):
+--   Q;v                                    who's hosting? hosts answer with T
+--   T;v;host;hostName;s1pid;s1name;s2pid;s2name   table state (s2pid "bot:<level>" for a bot, "" when free)
+--   J;v;host;pid;name                      ask to sit in seat 2
+--   L;host;pid                             leave the table (a player leaving mid-match forfeits)
+--   X;host                                 host closed the table
+--   C;host;pid;guestTime                   guest clock ping -> host answers c;host;pid;guestTime;hostTime
+--   Y;host;pid                             guest's clock is synced; ready to play
+--   R;host;pid                             guest pressed Play Now
+--   K;host;pid                             keepalive while nothing else was sent for a while
+--   E;host;matchNo;from;seq;ev|ev|...      match events (Codec)
+--   I;v;pid;name;nonce / O;pid;name;nonce;v;to     /pong ping diagnostic and its answers
+--
+-- Match time is the host's GetTime() minus the table's epoch. The guest measures its offset with C/c pings
+-- (keeping the lowest round trip); spectators estimate it from how late events arrive.
+
+local _, ns = ...
+local Net, Codec, Game, Sim, Bot = ns.Net, ns.Codec, ns.Game, ns.Sim, ns.Bot
+
+local Table = {}
+ns.Table = Table
+
+local TIMEOUT = 10          -- seconds of silence before a player counts as gone (forfeit)
+local KEEPALIVE = 3         -- send K after this long without sending anything
+local SYNC_PINGS, SYNC_GAP, SYNC_WAIT = 3, 0.4, 4
+local MOVE_BATCH_AGE = 0.25 -- a lone MOVE waits at most this long for company when tokens are low
+local TOKEN_RESERVE = 4     -- below this many tokens, MOVEs are batched instead of sent at once
+local ROOM = Net.MAX_BYTES - 40
+
+Table.known = {}   -- host pid -> table info from T messages
+Table.cur = nil    -- the table this client is at
+
+---------------------------------------------------------------------------
+-- Helpers
+---------------------------------------------------------------------------
+
+local function me() return Net.pid() end
+
+local function say(msg) ns.print(msg) end
+
+local function live()
+    return Game.match and Game.networked and Game.match.phase ~= "over"
+end
+
+local function seatName(s)
+    return s and s.name or ""
+end
+
+local function seatPid(s)
+    if not s then return "" end
+    if s.bot then return "bot:" .. s.bot end
+    return s.pid
+end
+
+local function parseSeat(pid, name)
+    if pid == nil or pid == "" then return nil end
+    local level = pid:match("^bot:(%a+)$")
+    if level then return { pid = pid, bot = Bot.PROFILES[level] and level or "normal", name = name } end
+    return { pid = pid, name = name }
+end
+
+local function heard(t, pid, now)
+    if t and pid then t.lastHeard[pid] = now end
+end
+
+local function newTable(role, host, hostName)
+    return { role = role, host = host, hostName = hostName, seats = {}, matchNo = 0, lastHeard = {},
+        seq = 0, lastSeq = {}, pending = {}, pendingSince = nil }
+end
+
+function Table.mySeat()
+    local t = Table.cur
+    if not t then return nil end
+    for seat = 1, 2 do
+        if t.seats[seat] and t.seats[seat].pid == me() then return seat end
+    end
+end
+
+---------------------------------------------------------------------------
+-- Announcing (host)
+---------------------------------------------------------------------------
+
+local function announce()
+    local t = Table.cur
+    if not t or t.role ~= "host" then return end
+    Net.send(Net.msg("T", Net.VERSION, t.host, t.hostName, seatPid(t.seats[1]), seatName(t.seats[1]),
+        seatPid(t.seats[2]), seatName(t.seats[2])))
+end
+
+---------------------------------------------------------------------------
+-- Matches
+---------------------------------------------------------------------------
+
+local function beginMatch(t, matchNo)
+    t.matchNo = matchNo
+    t.seq = 0
+    t.lastSeq = {}
+    t.pending = {}
+    local mySeat = Table.mySeat()
+    local s2 = t.seats[2]
+    local host = t.role == "host"
+    Game.begin({
+        names = { seatName(t.seats[1]), seatName(s2) },
+        seats = { host, (host and s2 and s2.bot ~= nil) or (mySeat == 2) },
+        host = host,
+        humanSeat = mySeat,
+        bots = (host and s2 and s2.bot) and { [2] = s2.bot } or nil,
+        base = t.base,
+        networked = true,
+    })
+end
+
+function Table.canStart()
+    local t = Table.cur
+    if not t or live() or not Table.mySeat() then return false end
+    local s2 = t.seats[2]
+    if not (t.seats[1] and s2) then return false end
+    if t.role == "host" then return s2.bot ~= nil or t.guestReady == true end
+    return t.synced == true
+end
+
+-- Play Now: the host starts right away; a guest asks the host.
+function Table.start()
+    local t = Table.cur
+    if not Table.canStart() then
+        if t and t.role == "guest" and not t.synced then say("still syncing with the host...") end
+        return false
+    end
+    if t.role == "host" then
+        beginMatch(t, t.matchNo + 1)
+        Game.push({ type = "START", t = Game.clock() })
+        ns.log("net match " .. t.matchNo .. ": " .. Game.names[1] .. " vs " .. Game.names[2])
+    else
+        Net.send(Net.msg("R", t.host, me()))
+    end
+    return true
+end
+
+-- Local events of a networked match wait here until the send policy lets them out.
+Game.onLocalEvent = function(ev)
+    local t = Table.cur
+    if not t then return end
+    t.pending[#t.pending + 1] = Codec.encodeEvent(ev)
+    t.pendingSince = t.pendingSince or GetTime()
+end
+
+local function flushEvents(t, now)
+    if #t.pending == 0 then return end
+    local urgent = false
+    for _, e in ipairs(t.pending) do
+        if e:sub(1, 1) ~= "M" then urgent = true break end
+    end
+    if not urgent and Net.tokens() < TOKEN_RESERVE and now - t.pendingSince < MOVE_BATCH_AGE then return end
+    for _, body in ipairs(Codec.pack(t.pending, ROOM)) do
+        local text = Net.msg("E", t.host, t.matchNo, me(), t.seq + 1, body)
+        if not Net.trySend(text) then break end
+        t.seq = t.seq + 1
+        local n = select(2, body:gsub("|", "")) + 1
+        for _ = 1, n do table.remove(t.pending, 1) end
+    end
+    t.pendingSince = (#t.pending > 0) and now or nil
+end
+
+-- Whether `from` may send this event: the host speaks for seat 1, a host-run bot, and match control;
+-- the guest only for its own paddle.
+local function allowed(t, from, ev)
+    local own = ev.type == "MOVE" or ev.type == "HIT" or ev.type == "MISS"
+    if from == t.host then
+        if own and ev.seat == 2 then return t.seats[2] ~= nil and t.seats[2].bot ~= nil end
+        return true
+    end
+    local s2 = t.seats[2]
+    return s2 ~= nil and s2.pid == from and own and ev.seat == 2
+end
+
+-- Forfeit for a seat whose player vanished. The host broadcasts it; others apply it locally when the host itself
+-- is the one gone.
+local function forfeit(t, seat, why)
+    if not live() then return end
+    ns.log("forfeit seat " .. seat .. ": " .. why)
+    if t.role == "host" then
+        Game.push({ type = "FORFEIT", t = Game.clock(), seat = seat })
+    else
+        Game.receive({ type = "FORFEIT", t = Game.clock(), seat = seat })
+    end
+end
+
+---------------------------------------------------------------------------
+-- Actions
+---------------------------------------------------------------------------
+
+function Table.host()
+    Table.leave(true)
+    Game.stop()
+    local t = newTable("host", me(), Net.name())
+    t.epoch = GetTime()
+    t.base = t.epoch
+    t.seats[1] = { pid = me(), name = Net.name() }
+    Table.cur = t
+    announce()
+    ns.log("hosting table")
+    say("table open. Others join with |cffffff00/pong join " .. t.hostName .. "|r, or add a bot with /pong bot.")
+end
+
+function Table.addBot(level)
+    local t = Table.cur
+    if not t or t.role ~= "host" then
+        say("host a table first (/pong host)")
+        return
+    end
+    if live() then return end
+    if t.seats[2] and not t.seats[2].bot then
+        say(t.seats[2].name .. " is in seat 2")
+        return
+    end
+    level = Bot.PROFILES[level or ""] and level or ns.db.level or "normal"
+    t.seats[2] = { pid = "bot:" .. level, bot = level, name = "Bot (" .. Bot.NAMES[level] .. ")" }
+    announce()
+end
+
+local function findTable(name)
+    name = (name or ""):lower()
+    local found
+    for _, info in pairs(Table.known) do
+        if info.hostName:lower() == name then found = info end
+    end
+    return found
+end
+
+local function afterLookup(name, fn)
+    local info = findTable(name)
+    if info then return fn(info) end
+    Net.send(Net.msg("Q", Net.VERSION))
+    say("looking for " .. name .. "'s table...")
+    C_Timer.After(2.5, function()
+        info = findTable(name)
+        if info then fn(info) else say("no table hosted by " .. name .. " found") end
+    end)
+end
+
+local function adopt(info, role)
+    local t = newTable(role, info.host, info.hostName)
+    t.seats = { info.seats[1], info.seats[2] }
+    t.lastHeard[info.host] = GetTime()
+    return t
+end
+
+function Table.join(name)
+    if name == "" then
+        say("usage: /pong join <host name>")
+        return
+    end
+    afterLookup(name, function(info)
+        if info.version ~= Net.VERSION then
+            say(info.hostName .. " runs a different WoW Pong version; update both to play")
+            return
+        end
+        Table.leave(true)
+        Game.stop()
+        Table.cur = adopt(info, "guest")
+        Net.send(Net.msg("J", Net.VERSION, info.host, me(), Net.name()))
+        say("joining " .. info.hostName .. "'s table...")
+    end)
+end
+
+function Table.watch(name)
+    if name == "" then
+        say("usage: /pong watch <host name>")
+        return
+    end
+    afterLookup(name, function(info)
+        Table.leave(true)
+        Game.stop()
+        Table.cur = adopt(info, "spectator")
+        say("watching " .. info.hostName .. "'s table")
+    end)
+end
+
+-- quiet = true when leaving because we're switching tables (no chat message).
+function Table.leave(quiet)
+    local t = Table.cur
+    if not t then return end
+    if t.role == "host" then
+        if live() then Game.push({ type = "FORFEIT", t = Game.clock(), seat = 1 }) end
+        flushEvents(t, math.huge)
+        Net.send(Net.msg("X", t.host))
+    elseif t.role == "guest" then
+        Net.send(Net.msg("L", t.host, me()))
+    end
+    if Game.networked then Game.stop() end
+    Table.cur = nil
+    if not quiet then say("left the table") end
+end
+
+---------------------------------------------------------------------------
+-- Clock sync (guest)
+---------------------------------------------------------------------------
+
+local function finishSync(t)
+    t.synced = true
+    Net.send(Net.msg("Y", t.host, me()))
+    ns.log(string.format("clock synced with %s, round trip %.3fs", t.hostName, t.bestRtt))
+end
+
+local function startSync(t)
+    t.syncing, t.synced, t.bestRtt, t.replies = true, false, nil, 0
+    for i = 0, SYNC_PINGS - 1 do
+        C_Timer.After(i * SYNC_GAP, function()
+            if Table.cur == t then Net.send(Net.msg("C", t.host, me(), string.format("%.3f", GetTime()))) end
+        end)
+    end
+    C_Timer.After(SYNC_WAIT, function()
+        if Table.cur ~= t or t.synced then return end
+        if t.bestRtt then
+            finishSync(t)
+        else
+            say("no reply from the host; leaving the table")
+            Table.leave(true)
+        end
+    end)
+end
+
+---------------------------------------------------------------------------
+-- Receiving
+---------------------------------------------------------------------------
+
+local H = Net.handlers
+
+H.Q = function(f)
+    local t = Table.cur
+    if not t or t.role ~= "host" then return end
+    C_Timer.After(math.random() * 1.5, announce)
+end
+
+H.T = function(f, now)
+    local host = f[3]
+    if host == me() then return end
+    local info = { version = tonumber(f[2]), host = host, hostName = f[4],
+        seats = { parseSeat(f[5], f[6]), parseSeat(f[7], f[8]) }, heardAt = now }
+    Table.known[host] = info
+    local t = Table.cur
+    if not t or t.host ~= host or t.role == "host" then return end
+    heard(t, host, now)
+    t.seats = info.seats
+    if t.role == "guest" then
+        local s2 = t.seats[2]
+        if s2 and s2.pid == me() then
+            if not t.syncing then startSync(t) end
+        elseif not live() then
+            say(t.hostName .. "'s table is full; watching instead")
+            t.role = "spectator"
+        end
+    end
+end
+
+H.X = function(f)
+    Table.known[f[2]] = nil
+    local t = Table.cur
+    if not t or t.host ~= f[2] or t.role == "host" then return end
+    forfeit(t, 1, "host closed the table")
+    say(t.hostName .. " closed the table")
+    Table.cur = nil
+end
+
+H.J = function(f, now)
+    local t = Table.cur
+    if not t or t.role ~= "host" or f[3] ~= t.host then return end
+    local pid, name = f[4], f[5]
+    if tonumber(f[2]) ~= Net.VERSION then return end
+    local s2 = t.seats[2]
+    if s2 and s2.pid ~= pid and not (s2.bot and not live()) then
+        announce()   -- they'll see the seat is taken
+        return
+    end
+    t.seats[2] = { pid = pid, name = name }
+    t.guestReady = false
+    heard(t, pid, now)
+    announce()
+    say(name .. " joined your table")
+end
+
+H.L = function(f)
+    local t = Table.cur
+    if not t or t.role ~= "host" or f[2] ~= t.host then return end
+    local s2 = t.seats[2]
+    if not s2 or s2.pid ~= f[3] then return end
+    forfeit(t, 2, s2.name .. " left")
+    t.seats[2] = nil
+    announce()
+    say(s2.name .. " left your table")
+end
+
+H.C = function(f, now)
+    local t = Table.cur
+    if not t or t.role ~= "host" or f[2] ~= t.host then return end
+    heard(t, f[3], now)
+    local reply = Net.msg("c", t.host, f[3], f[4], string.format("%.3f", GetTime() - t.epoch))
+    if not Net.trySend(reply) then Net.send(reply, true) end
+end
+
+H.c = function(f, now)
+    local t = Table.cur
+    if not t or t.role ~= "guest" or f[2] ~= t.host or f[3] ~= me() then return end
+    heard(t, t.host, now)
+    local sent, hostTime = tonumber(f[4]), tonumber(f[5])
+    if not sent or not hostTime then return end
+    local rtt = now - sent
+    if not t.bestRtt or rtt < t.bestRtt then
+        t.bestRtt = rtt
+        t.base = now - (hostTime + rtt / 2)
+    end
+    t.replies = t.replies + 1
+    if t.replies >= SYNC_PINGS and not t.synced then finishSync(t) end
+end
+
+H.Y = function(f, now)
+    local t = Table.cur
+    if not t or t.role ~= "host" or f[2] ~= t.host then return end
+    if t.seats[2] and t.seats[2].pid == f[3] then
+        t.guestReady = true
+        heard(t, f[3], now)
+    end
+end
+
+H.R = function(f, now)
+    local t = Table.cur
+    if not t or t.role ~= "host" or f[2] ~= t.host then return end
+    if t.seats[2] and t.seats[2].pid == f[3] then
+        heard(t, f[3], now)
+        t.guestReady = true
+        Table.start()
+    end
+end
+
+H.K = function(f, now)
+    local t = Table.cur
+    if t and t.host == f[2] then heard(t, f[3], now) end
+end
+
+H.E = function(f, now)
+    local t = Table.cur
+    local from = f[4]
+    if not t or t.host ~= f[2] or from == me() then return end
+    heard(t, from, now)
+    local matchNo, seq = tonumber(f[3]), tonumber(f[5])
+    if not matchNo or not seq then return end
+    local events = {}
+    for s in (f[6] or ""):gmatch("[^|]+") do
+        local ev = Codec.decodeEvent(s)
+        if ev and allowed(t, from, ev) then events[#events + 1] = ev end
+    end
+    if #events == 0 then return end
+
+    if t.role == "spectator" then
+        -- Estimate the host clock from the earliest-looking arrival.
+        for _, ev in ipairs(events) do
+            local b = now - ev.t
+            if not t.base or b < t.base then t.base = b end
+        end
+        if Game.networked then Game.base = t.base end
+    end
+
+    if matchNo > t.matchNo then
+        if events[1].type ~= "START" then return end   -- joined mid-match: wait for the next one
+        beginMatch(t, matchNo)
+    elseif matchNo < t.matchNo or not Game.networked then
+        return
+    end
+    local last = t.lastSeq[from]
+    if last and seq ~= last + 1 then ns.log(string.format("net: %s seq gap %d -> %d", from, last, seq)) end
+    t.lastSeq[from] = seq
+    for _, ev in ipairs(events) do Game.receive(ev) end
+end
+
+-- /pong ping diagnostic
+local pingSent = {}   -- nonce -> GetTime()
+H.I = function(f, now)
+    if f[3] == me() then return end
+    ns.log("ping from " .. (f[4] or "?") .. " (v" .. (f[2] or "?") .. ")")
+    Net.send(Net.msg("O", me(), Net.name(), f[5], Net.VERSION, f[3]), true)
+end
+H.O = function(f, now)
+    if f[6] ~= me() then return end
+    local sent = pingSent[f[4]]
+    local rtt = sent and string.format("%.2fs", now - sent) or "?"
+    ns.log("pong from " .. (f[3] or "?") .. " (v" .. (f[5] or "?") .. ") in " .. rtt, true)
+end
+
+function Table.ping()
+    local nonce = string.format("%04x", math.random(0, 65535))
+    pingSent[nonce] = GetTime()
+    if Net.channelId() == 0 then say("not in the WoW Pong channel yet; try again in a few seconds") return end
+    Net.send(Net.msg("I", Net.VERSION, me(), Net.name(), nonce))
+    say("ping sent on the WoW Pong channel; replies show up here (see /pong log)")
+end
+
+---------------------------------------------------------------------------
+-- Per-frame upkeep: send events, keepalives, timeouts
+---------------------------------------------------------------------------
+
+Net.onUpdate = function(now)
+    local t = Table.cur
+    if not t then return end
+    flushEvents(t, now)
+    local seated = t.role == "host" or Table.mySeat() ~= nil
+    if seated and Net.idleFor() >= KEEPALIVE and Net.queued() == 0 then
+        Net.send(Net.msg("K", t.host, me()))
+    end
+    if t.role == "host" then
+        local s2 = t.seats[2]
+        if s2 and not s2.bot and now - (t.lastHeard[s2.pid] or now) > TIMEOUT then
+            forfeit(t, 2, s2.name .. " went quiet")
+            say(s2.name .. " disconnected")
+            t.seats[2] = nil
+            announce()
+        end
+    elseif now - (t.lastHeard[t.host] or now) > TIMEOUT then
+        forfeit(t, 1, "host went quiet")
+        say(t.hostName .. "'s table is gone (no word for " .. TIMEOUT .. "s)")
+        Table.cur = nil
+    end
+end
+
+---------------------------------------------------------------------------
+-- Status for the window
+---------------------------------------------------------------------------
+
+-- Header names and a status line while no networked match is being played.
+function Table.status()
+    local t = Table.cur
+    if not t then return nil end
+    local s2 = t.seats[2]
+    if t.role == "host" then
+        if not s2 then return "Waiting for an opponent", "They type /pong join " .. t.hostName .. " (or /pong bot)" end
+        if not s2.bot and not t.guestReady then return "Syncing with " .. s2.name .. "...", "" end
+        return "Ready", "Press Play Now"
+    elseif t.role == "guest" then
+        if not t.synced then return "Joining " .. t.hostName .. "'s table...", "" end
+        return "Ready", "Press Play Now"
+    end
+    return "Watching " .. t.hostName .. "'s table", "Waiting for the next match"
+end
+
+function Table.names()
+    local t = Table.cur
+    if not t then return nil end
+    return seatName(t.seats[1]), seatName(t.seats[2])
+end
+
+function Table.list()
+    local n = 0
+    for _, info in pairs(Table.known) do
+        n = n + 1
+        local s2 = info.seats[2]
+        say(string.format("  %s's table: %s vs %s", info.hostName, seatName(info.seats[1]),
+            s2 and s2.name or "(open)"))
+    end
+    if n == 0 then say("no tables seen yet") end
+    Net.send(Net.msg("Q", Net.VERSION))
+end
+
+---------------------------------------------------------------------------
+-- Slash commands
+---------------------------------------------------------------------------
+
+ns.commands.host = function() Table.host() end
+ns.commands.join = function(arg) Table.join(arg) end
+ns.commands.watch = function(arg) Table.watch(arg) end
+ns.commands.bot = function(arg) Table.addBot(arg:lower()) end
+ns.commands.start = function() Table.start() end
+ns.commands.leave = function() Table.leave() end
+ns.commands.tables = function() Table.list() end
+ns.commands.ping = function() Table.ping() end
+ns.commands.net = function()
+    local s = Net.stats
+    say(string.format("channel #%d, sent %d, received %d, throttled %d, failed %d, queued %d, tokens %.1f",
+        Net.channelId(), s.sent, s.received, s.throttled, s.failed, Net.queued(), Net.tokens()))
+end
+table.insert(ns.help, "/pong host - open a table (you take seat 1)")
+table.insert(ns.help, "/pong join <name> - sit at <name>'s table; /pong watch <name> - spectate it")
+table.insert(ns.help, "/pong bot [level] - (host) put a bot in seat 2")
+table.insert(ns.help, "/pong start - Play Now; /pong leave - leave the table")
+table.insert(ns.help, "/pong tables - list tables; /pong ping - check who can hear you; /pong net - stats")

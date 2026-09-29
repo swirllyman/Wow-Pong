@@ -113,6 +113,9 @@ function methods.ClearFocus(self)
 end
 function methods.HasFocus(self) return self.focused or false end
 function methods.HighlightText(self) self.highlighted = true end
+function methods.Enable(self) self.disabled = false end
+function methods.Disable(self) self.disabled = true end
+function methods.IsEnabled(self) return not self.disabled end
 function methods.SetMultiLine(self, v) self.multiline = v end
 function methods.GetEffectiveScale(self) return 1 end
 function methods.GetBottom(self) return 0 end
@@ -261,9 +264,21 @@ function C_ChatInfo.RegisterAddonMessagePrefix(p)
     registeredPrefixes[p] = true
     return 0
 end
+-- Like the real client: a per-prefix allowance of 10 messages that regains 1 per second; over it, the message
+-- is dropped and AddonMessageThrottle (3) returned.
+throttle = { tokens = {}, at = {}, dropped = 0 }
 function C_ChatInfo.SendAddonMessage(prefix, text, dist, target)
     assert(type(text) == "string" and not issecretvalue(text), "bad text")
     assert(#text <= 255, "addon message over 255 bytes: " .. #text)
+    local tk = throttle.tokens[prefix] or 10
+    if throttle.at[prefix] then tk = math.min(10, tk + (now - throttle.at[prefix])) end
+    throttle.at[prefix] = now
+    if tk < 1 then
+        throttle.tokens[prefix] = tk
+        throttle.dropped = throttle.dropped + 1
+        return 3
+    end
+    throttle.tokens[prefix] = tk - 1
     table.insert(outbox, { prefix = prefix, text = text, dist = dist, target = target })
     return 0
 end
@@ -276,10 +291,12 @@ SlashCmdList = {}
 class Client:
     """One fake WoW client running the real addon."""
 
-    def __init__(self, name="John", guid="Player-1-0001", realm="Forever", secret_name=False, surname=None):
+    def __init__(self, name="John", guid="Player-1-0001", realm="Forever", secret_name=False, surname=None,
+                 start_time=1000):
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         self.lua.execute(FAKE_WOW)
         g = self.lua.globals()
+        g.now = start_time   # each client's GetTime() has its own origin, like real machines
         g.ME.name, g.ME.guid, g.ME.nrealm, g.ME.secretName = name, guid, realm, secret_name
         g.ME.surname = surname
         self.name, self.guid = name, guid

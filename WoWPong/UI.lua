@@ -3,7 +3,7 @@
 -- sends clicks to Game.click; it never changes a match directly. All widgets live on `ui` (ns._ui for tests).
 
 local _, ns = ...
-local Sim, Game, Bot = ns.Sim, ns.Game, ns.Bot
+local Sim, Game, Bot, Table = ns.Sim, ns.Game, ns.Bot, ns.Table
 
 local ui = {}
 ns._ui = ui
@@ -161,8 +161,12 @@ local function buildFooter(frame)
     ui.levelBtn:SetPoint("LEFT", ui.practiceBtn, "RIGHT", 6, 0)
     ui.demoBtn = newButton(frame, "Watch Bots", 100, function() ui.startDemo() end)
     ui.demoBtn:SetPoint("LEFT", ui.levelBtn, "RIGHT", 6, 0)
-    ui.stopBtn = newButton(frame, "Stop", 70, function() Game.stop() end)
+    ui.stopBtn = newButton(frame, "Stop", 60, function()
+        if Table.cur then Table.leave() else Game.stop() end
+    end)
     ui.stopBtn:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -INSET, 16)
+    ui.playBtn = newButton(frame, "Play Now", 80, function() Table.start() end)
+    ui.playBtn:SetPoint("RIGHT", ui.stopBtn, "LEFT", -6, 0)
 end
 
 local function build()
@@ -214,7 +218,7 @@ local function build()
 
     buildBoard(frame)
     buildFooter(frame)
-    frame:SetScript("OnUpdate", function() ui.render(GetTime()) end)
+    frame:SetScript("OnUpdate", function() ui.render(Game.clock()) end)
     frame:Hide()
 end
 
@@ -230,18 +234,28 @@ local function statusText(m, now)
     return ""
 end
 
+local function setEnabled(button, on)
+    if on then button:Enable() else button:Disable() end
+    button:SetAlpha(on and 1 or 0.5)
+end
+
 function ui.render(now)
     local m = Game.match
+    setEnabled(ui.playBtn, Table.canStart())
+    ui.stopBtn:SetText(Table.cur and "Leave" or "Stop")
     if not m then
+        local n1, n2 = Table.names()
         for seat = 1, 2 do
             place(ui.paddles[seat], Sim.PADDLE_X[seat], Sim.H / 2)
             ui.ghosts[seat]:Hide()
             ui.scores[seat]:SetText("0")
-            ui.names[seat]:SetText("")
         end
+        ui.names[1]:SetText(n1 or "")
+        ui.names[2]:SetText(n2 or "")
         ui.ball:Hide()
-        ui.status:SetText("WoW Pong")
-        ui.hint:SetText("Practice against a bot, or watch two bots play.")
+        local status, hint = Table.status()
+        ui.status:SetText(status or "WoW Pong")
+        ui.hint:SetText(hint or "Practice against a bot, or watch two bots play.")
         return
     end
 
@@ -277,6 +291,8 @@ function ui.render(now)
     ui.status:SetText(statusText(m, now))
     if m.phase == "countdown" and Game.humanSeat then
         ui.hint:SetText("Click the board to move your paddle. First to " .. m.pointsToWin .. ".")
+    elseif m.phase == "over" and Table.canStart() then
+        ui.hint:SetText("Press Play Now for a rematch")
     else
         ui.hint:SetText("")
     end
@@ -300,12 +316,14 @@ function ui.toggle()
 end
 
 function ui.startPractice(level)
+    Table.leave(true)
     level = level or ns.db.level or "normal"
     Game.startLocal({ { kind = "human" }, { kind = "bot", level = level } })
     ui.show()
 end
 
 function ui.startDemo(level1, level2)
+    Table.leave(true)
     local level = ns.db.level or "normal"
     Game.startLocal({ { kind = "bot", level = level1 or level }, { kind = "bot", level = level2 or level } })
     ui.show()
@@ -320,6 +338,14 @@ ns.commands.demo = function(arg)
     ui.startDemo(parseLevel(a), parseLevel(b))
 end
 ns.commands.stop = function() Game.stop() end
+-- Table commands open the window too.
+for _, name in ipairs({ "host", "join", "watch", "bot", "start" }) do
+    local fn = ns.commands[name]
+    ns.commands[name] = function(arg)
+        fn(arg)
+        ui.show()
+    end
+end
 table.insert(ns.help, 1, "/pong - open or close the Pong window")
 table.insert(ns.help, 2, "/pong practice [easy|normal|hard] - play against a bot")
 table.insert(ns.help, 3, "/pong demo [level] [level] - watch two bots play")
