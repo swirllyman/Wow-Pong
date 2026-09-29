@@ -3,7 +3,7 @@
 -- ball and paddle positions are functions of time, so frame rate never affects the outcome.
 --
 -- Events (all carry t, an absolute match time in seconds):
---   START                                  countdown, then the host serves
+--   START   win                            countdown, then the host serves; win = points to win (1-21)
 --   SERVE   dir (1 = toward seat 2), angle ball leaves the centre
 --   MOVE    seat, y                        a player (or bot) clicked: paddle glides toward y
 --   HIT     seat, x, y, vx, vy, speed      the seat's owner judged a hit; carries the new ball path
@@ -28,7 +28,8 @@ Sim.BALL_SPEEDUP = 1.12          -- speed multiplier per paddle hit
 Sim.BALL_SPEED_MAX = 650
 Sim.MAX_BOUNCE = math.rad(60)    -- exit angle for a hit on the very edge of a paddle
 Sim.SERVE_ANGLE = math.rad(30)   -- serves leave at a random angle within +-this
-Sim.POINTS_TO_WIN = 7
+Sim.POINTS_TO_WIN = 7            -- default; START carries the match's own target
+Sim.MAX_POINTS = 21
 Sim.COUNTDOWN = 3                -- seconds from START to the first serve
 Sim.POINT_DELAY = 1.5            -- seconds from a miss to the next serve
 
@@ -69,6 +70,7 @@ function Sim.newMatch(opts)
         paddles = { { y = mid, target = mid, t = 0 }, { y = mid, target = mid, t = 0 } },
         ball = { x = Sim.W / 2, y = mid, vx = 0, vy = 0, speed = 0, t = 0 },
         hits = 0,          -- paddle hits in the current rally
+        longest = 0,       -- longest rally (hits) this match
         serveAt = nil,     -- when the host serves next (countdown and point phases)
         serveDir = nil,    -- direction of the next serve; nil = random
         winner = nil,
@@ -126,6 +128,9 @@ function apply.START(m, ev)
     m.phase = "countdown"
     m.score = { 0, 0 }
     m.winner, m.forfeit, m.serveDir = nil, false, nil
+    local win = tonumber(ev.win)
+    if win and win >= 1 and win <= Sim.MAX_POINTS and win == math.floor(win) then m.pointsToWin = win end
+    m.hits, m.longest = 0, 0
     m.serveAt = ev.t + Sim.COUNTDOWN
     m.ball = { x = Sim.W / 2, y = Sim.H / 2, vx = 0, vy = 0, speed = 0, t = ev.t }
     m.trajectory = m.trajectory + 1
@@ -150,6 +155,7 @@ end
 
 function apply.HIT(m, ev)
     m.hits = m.hits + 1
+    if m.hits > m.longest then m.longest = m.hits end
     m.ball = { x = ev.x, y = ev.y, vx = ev.vx, vy = ev.vy, speed = ev.speed, t = ev.t }
     m.trajectory = m.trajectory + 1
 end
@@ -177,6 +183,7 @@ end
 function Sim.restore(m, s)
     m.phase, m.score, m.serveAt, m.serveDir = s.phase, s.score, s.serveAt, s.serveDir
     m.hits, m.winner, m.forfeit = s.hits, s.winner, s.forfeit
+    m.pointsToWin, m.longest = s.pointsToWin, s.longest
     m.ball, m.paddles = s.ball, s.paddles
     m.trajectory = m.trajectory + 1
 end

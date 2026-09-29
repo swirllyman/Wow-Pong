@@ -1,6 +1,6 @@
--- The Pong window: header with names, the board (paddles, ghost targets, ball, scores, status), and a temporary
--- control bar (practice vs bot, watch bots, stop) until the lobby replaces it. Only reads Game/Sim state and
--- sends clicks to Game.click; it never changes a match directly. All widgets live on `ui` (ns._ui for tests).
+-- The Pong window: header with names, the board (paddles, ghost targets, ball, scores, status), the lobby, and a
+-- mode-dependent footer. Only reads Game/Sim state and sends clicks to Game.click; it never changes a match
+-- directly. Display options (OptionsUI.lua) are applied here. All widgets live on `ui` (ns._ui for tests).
 
 local _, ns = ...
 local Sim, Game, Bot, Table = ns.Sim, ns.Game, ns.Bot, ns.Table
@@ -18,8 +18,14 @@ local INSET = 16                      -- the dialog border is ~12px wide
 local HEADER_H, FOOTER_H = 58, 48
 local FRAME_W, FRAME_H = Sim.W + 2 * INSET, HEADER_H + Sim.H + FOOTER_H
 local SEAT_COLOR = { { 0.35, 0.65, 1 }, { 1, 0.45, 0.35 } }
+local MINE_COLOR, THEIRS_COLOR, RETRO_COLOR = { 0.35, 0.9, 0.4 }, { 1, 0.4, 0.35 }, { 0.95, 0.95, 0.95 }
 local GHOST_ALPHA = 0.3
 local CENTER_DASHES = 15
+local TRAIL_MAX, TRAIL_GAP = 8, 0.018           -- trail dots and the time between them
+local TRAIL_LEN = { off = 0, short = 4, long = TRAIL_MAX }
+local FLASH_TIME = 0.18                         -- seconds a paddle glows after a hit
+local STEER_GAP, STEER_GAP_NET, STEER_MIN = 0.05, 0.25, 6   -- hold to steer: min seconds / units between moves
+local POINTS_CHOICES = { 1, 3, 5, 7 }           -- the match length button (header) cycles these
 
 ---------------------------------------------------------------------------
 -- Small helpers
@@ -93,15 +99,17 @@ local function buildBoard(frame)
     ui.board = board
     board:SetSize(Sim.W, Sim.H)
     board:SetPoint("TOP", frame, "TOP", 0, -HEADER_H)
-    local bg = newRect(board, "BACKGROUND", 0, 0, 0, 0.92)
-    bg:SetAllPoints(board)
+    ui.boardBg = newRect(board, "BACKGROUND", 0, 0, 0, 0.92)
+    ui.boardBg:SetAllPoints(board)
 
     -- dashed centre line
+    ui.dashes = {}
     local dashH = Sim.H / (CENTER_DASHES * 2)
     for i = 0, CENTER_DASHES - 1 do
         local d = newRect(board, "BORDER", 1, 1, 1, 0.18)
         d:SetSize(2, dashH)
         place(d, Sim.W / 2, dashH / 2 + i * dashH * 2 + dashH / 2)
+        ui.dashes[#ui.dashes + 1] = d
     end
 
     ui.scores, ui.paddles, ui.ghosts = {}, {}, {}
@@ -127,6 +135,15 @@ local function buildBoard(frame)
     ui.ball = newRect(board, "OVERLAY", 1, 1, 1, 1)
     ui.ball:SetSize(Sim.BALL_R * 2, Sim.BALL_R * 2)
     ui.ball:Hide()
+    ui.trail = {}
+    for i = 1, TRAIL_MAX do
+        local dot = newRect(board, "ARTWORK", 1, 1, 1, 0.45 * (1 - i / (TRAIL_MAX + 1)))
+        local size = Sim.BALL_R * 2 * (1 - 0.5 * i / TRAIL_MAX)
+        dot:SetSize(size, size)
+        dot:Hide()
+        ui.trail[i] = dot
+    end
+    ui.flash = {}
 
     ui.status = newText(board, 22)
     ui.status:SetPoint("CENTER", board, "CENTER", 0, 20)
@@ -134,14 +151,26 @@ local function buildBoard(frame)
     ui.hint = newText(board, 12)
     ui.hint:SetPoint("TOP", ui.status, "BOTTOM", 0, -8)
     ui.hint:SetTextColor(0.8, 0.8, 0.8)
+    ui.rally = newText(board, 12, "BORDER")
+    ui.rally:SetPoint("BOTTOM", board, "BOTTOM", 0, 8)
+    ui.rally:SetTextColor(1, 1, 1, 0.6)
+    ui.rally:SetText("")
 
-    -- Click to move: convert the cursor to board coordinates.
+    -- Click to move: convert the cursor to board coordinates. With "hold to steer", ui.steer keeps following the
+    -- cursor until the button comes up (see steer()).
     board:EnableMouse(true)
-    board:SetScript("OnMouseDown", function(self)
-        local _, cy = GetCursorPosition()
-        local y = cy / self:GetEffectiveScale() - (self:GetBottom() or 0)
+    board:SetScript("OnMouseDown", function()
+        local y = ui.cursorY()
         Game.click(y)
+        if ns.opt("holdToSteer") then ui.steering = { y = y, at = GetTime() } end
     end)
+    board:SetScript("OnMouseUp", function() ui.steering = nil end)
+    board:SetScript("OnHide", function() ui.steering = nil end)
+end
+
+function ui.cursorY()
+    local _, cy = GetCursorPosition()
+    return cy / ui.board:GetEffectiveScale() - (ui.board:GetBottom() or 0)
 end
 
 local function levelLabel()
@@ -178,6 +207,8 @@ local function buildLobby(frame)
         ui.lobbyAt = nil
     end)
     ui.ledgerBtn:SetPoint("RIGHT", ui.statsBtn, "LEFT", -6, 0)
+    ui.optionsBtn = newButton(lobby, "Options", 70, function() if ui.toggleOptions then ui.toggleOptions() end end)
+    ui.optionsBtn:SetPoint("RIGHT", ui.ledgerBtn, "LEFT", -6, 0)
 
     -- Stats panel, drawn over the table rows.
     ui.statsLines = {}
@@ -273,7 +304,7 @@ local function applyMode(mode)
     setShown(ui.levelBtn, mode == "lobby" or isHost)
     setShown(ui.botBtn, isHost)
     setShown(ui.seatBtn, isHost)
-    if ui.betsPanel then setShown(ui.betsPanel, mode == "table" and t ~= nil) end
+    if ui.betsPanel then setShown(ui.betsPanel, mode == "table" and t ~= nil and ns.opt("betsPanel")) end
     setShown(ui.playBtn, t ~= nil and t.role ~= "spectator")
     setShown(ui.stopBtn, mode ~= "lobby")
     ui.levelBtn:ClearAllPoints()
@@ -337,7 +368,9 @@ local function build()
     frame:SetMovable(true)
     frame:EnableMouse(true)
     frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", frame.StartMoving)
+    frame:SetScript("OnDragStart", function(self)
+        if not ns.opt("lockWindow") then self:StartMoving() end
+    end)
     frame:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
         local point, _, relPoint, x, y = self:GetPoint(1)
@@ -375,12 +408,19 @@ local function build()
         ui.names[seat] = n
     end
 
+    -- Match length: first to 1/3/5/7. Editable in the lobby, by a host between matches and after a local match;
+    -- otherwise it just shows the length being played (or the host's choice for the next match).
+    ui.pointsBtn = newButton(frame, "First to 7", 90, function(_, button) ui.cyclePoints(button == "RightButton") end)
+    pcall(ui.pointsBtn.RegisterForClicks, ui.pointsBtn, "LeftButtonUp", "RightButtonUp")
+    ui.pointsBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", INSET, -10)
+
     buildBoard(frame)
     buildLobby(frame)
     buildFooter(frame)
     frame:SetScript("OnUpdate", function() ui.render(Game.clock()) end)
     frame:SetScript("OnShow", function() Table.refresh() end)
     frame:Hide()
+    ui.applyOptions()
 end
 
 ---------------------------------------------------------------------------
@@ -398,6 +438,44 @@ end
 local function setEnabled(button, on)
     if on then button:Enable() else button:Disable() end
     button:SetAlpha(on and 1 or 0.5)
+end
+
+-- The match length the header button shows, and whether this client may change it right now.
+local function pointsState()
+    local t, m = Table.cur, Game.match
+    if t then
+        local live = Game.networked and m and m.phase ~= "over"
+        return Table.points(), t.role == "host" and not live
+    end
+    if m and m.phase ~= "over" then return m.pointsToWin, false end
+    return ns.opt("points"), true
+end
+
+function ui.cyclePoints(back)
+    if not select(2, pointsState()) then return end
+    local cur, n = ns.opt("points"), #POINTS_CHOICES
+    local i = n
+    for k, v in ipairs(POINTS_CHOICES) do
+        if v == cur then i = k end
+    end
+    i = back and ((i - 2) % n + 1) or (i % n + 1)
+    ns.Options.set("points", POINTS_CHOICES[i])
+end
+
+local function updatePointsBtn()
+    local value, editable = pointsState()
+    local label = "First to " .. tostring(value)
+    if ui.pointsBtn:GetText() ~= label then ui.pointsBtn:SetText(label) end
+    setEnabled(ui.pointsBtn, editable)
+end
+
+-- "Rally 12" while the ball is in play (and just after the point), the match's longest rally once it's over.
+local function rallyText(m)
+    if m.phase == "over" then
+        return m.longest > 0 and ("Longest rally: " .. m.longest) or ""
+    end
+    if (m.phase == "play" or m.phase == "point") and m.hits > 0 then return "Rally " .. m.hits end
+    return ""
 end
 
 local function renderStats()
@@ -433,6 +511,13 @@ function ui.renderLobby()
     ui.lobbyTitle:SetText("Tables")
     for _, fs in ipairs(ui.statsLines) do fs:SetText("") end
     local list = Table.list()
+    if ns.opt("hideOtherVersions") then
+        local same = {}
+        for _, info in ipairs(list) do
+            if info.version == ns.Net.VERSION then same[#same + 1] = info end
+        end
+        list = same
+    end
     local pages = math.max(1, math.ceil(#list / LOBBY_ROWS))
     ui.page = math.min(ui.page, pages)
     for i, row in ipairs(ui.rows) do
@@ -466,13 +551,151 @@ function ui.renderLobby()
     setShown(ui.nextBtn, pages > 1)
 end
 
+---------------------------------------------------------------------------
+-- Colors, hit flashes, the ball trail and hold to steer (display options)
+---------------------------------------------------------------------------
+
+local function mySeat()
+    return Game.humanSeat or Table.mySeat()
+end
+
+-- The player id in a seat (nil for bots and empty seats).
+local function seatPid(seat)
+    local t = Table.cur
+    if t then
+        local s = t.seats[seat]
+        return s and not s.bot and s.pid or nil
+    end
+    if Game.match and Game.humanSeat == seat then return ns.Net.pid() end
+end
+
+local function classColor(pid)
+    if not pid or type(GetPlayerInfoByGUID) ~= "function" then return nil end
+    local ok, _, classFile = pcall(GetPlayerInfoByGUID, "Player-" .. pid)
+    if not ok or not classFile or ns.isSecret(classFile) then return nil end
+    local c = RAID_CLASS_COLORS and RAID_CLASS_COLORS[classFile]
+    if c then return { c.r, c.g, c.b } end
+end
+
+function ui.seatColor(seat)
+    local scheme = ns.opt("colors")
+    if scheme == "retro" then return RETRO_COLOR end
+    local me = mySeat()
+    if scheme == "mine" and me then return seat == me and MINE_COLOR or THEIRS_COLOR end
+    if scheme == "class" then
+        local c = classColor(seatPid(seat))
+        if c then return c end
+    end
+    return SEAT_COLOR[seat]
+end
+
+-- Recolors names, scores and markers when who sits where (or the scheme) changes, and every second anyway since a
+-- player's class may only become known later.
+local function updateColors()
+    local now = GetTime()
+    local key = ns.opt("colors") .. ";" .. (mySeat() or 0) .. ";" .. (seatPid(1) or "") .. ";" .. (seatPid(2) or "")
+    if key == ui.colorKey and now - (ui.colorsAt or 0) < 1 then return end
+    ui.colorKey, ui.colorsAt = key, now
+    ui.colors = {}
+    for seat = 1, 2 do
+        local c = ui.seatColor(seat)
+        ui.colors[seat] = c
+        ui.ghosts[seat]:SetColorTexture(c[1], c[2], c[3], GHOST_ALPHA)
+        ui.scores[seat]:SetTextColor(c[1], c[2], c[3], 0.55)
+        ui.names[seat]:SetTextColor(c[1], c[2], c[3])
+    end
+end
+
+-- Paints a paddle in its seat color, blended toward white for a moment after it hits the ball.
+local function paintPaddle(seat)
+    local c = ui.colors[seat]
+    local k = 0
+    local hitAt = ui.flash[seat]
+    if hitAt and ns.opt("hitFlash") then k = math.max(0, 1 - (GetTime() - hitAt) / FLASH_TIME) end
+    ui.paddles[seat]:SetColorTexture(c[1] + (1 - c[1]) * k, c[2] + (1 - c[2]) * k, c[3] + (1 - c[3]) * k, 1)
+end
+
+-- Dots where the ball was a moment ago, back to its last paddle hit (or the serve).
+local function drawTrail(m, t)
+    local n = (m.phase == "play" or m.phase == "point") and (TRAIL_LEN[ns.opt("trail")] or 0) or 0
+    for i, dot in ipairs(ui.trail) do
+        local tt = t - i * TRAIL_GAP
+        local shown = false
+        if i <= n and tt > m.ball.t then
+            local x, y = Sim.ballPos(m, tt)
+            if x >= 0 and x <= Sim.W then
+                place(dot, x, y)
+                shown = true
+            end
+        end
+        setShown(dot, shown)
+    end
+end
+
+-- Hold to steer: while the button is down on the board, the target follows the cursor (rate-limited, more so in
+-- networked matches where moves are messages).
+local function steer()
+    local st = ui.steering
+    if not st then return end
+    local down = type(IsMouseButtonDown) ~= "function" or IsMouseButtonDown("LeftButton")
+    if not (ns.opt("holdToSteer") and Game.humanSeat and down) then
+        ui.steering = nil
+        return
+    end
+    local now, y = GetTime(), ui.cursorY()
+    local gap = Game.networked and STEER_GAP_NET or STEER_GAP
+    if math.abs(y - st.y) >= STEER_MIN and now - st.at >= gap then
+        Game.click(y)
+        st.y, st.at = y, now
+    end
+end
+
+Game.listeners[#Game.listeners + 1] = function(ev)
+    if ev.type == "HIT" then ui.flash[ev.seat] = GetTime() end
+    -- Your networked match starting (e.g. the guest pressed Play Now) opens the window if it was closed.
+    if ev.type == "START" and Game.networked and Game.humanSeat and ns.opt("autoOpen") and ui.frame
+        and not ui.frame:IsShown() then
+        ui.frame:Show()
+    end
+end
+
+Table.onGuestJoined = function()
+    if ns.opt("autoOpen") and ui.frame and not ui.frame:IsShown() then ui.frame:Show() end
+end
+
+-- "Tell me when a table opens": a new, never-played table heard unprompted. Tables first heard in the minute after
+-- login, or right after our own "who's hosting?" query, already existed, so they stay quiet.
+local loadedAt = GetTime()
+local NOTICE_QUIET, NOTICE_QUERY_GAP = 45, 5
+
+Table.onTableSeen = function(info, now)
+    if not ns.opt("tableNotice") or info.version ~= ns.Net.VERSION then return end
+    if info.state ~= "open" or info.matchNo ~= 0 or now - loadedAt < NOTICE_QUIET then return end
+    if Table.lastQuery and now - Table.lastQuery < NOTICE_QUERY_GAP then return end
+    if Game.match and Game.networked and Game.match.phase ~= "over" then return end
+    ns.print(info.hostName .. " opened a Pong table - type /pong to sit down")
+end
+
+-- Applies window-level options (at build and after every option change).
+function ui.applyOptions()
+    if not ui.frame then return end
+    ui.frame:SetScale(ns.opt("scale"))
+    ui.boardBg:SetColorTexture(0, 0, 0, ns.opt("boardAlpha"))
+    for _, d in ipairs(ui.dashes) do setShown(d, ns.opt("centerLine")) end
+    ui.colorKey, ui.modeKey, ui.lobbyAt = nil, nil, nil
+end
+
+table.insert(ns.Options.listeners, function() ui.applyOptions() end)
+
 function ui.render(now)
     local mode = (Table.cur or Game.match) and "table" or "lobby"
     if mode .. (Table.cur and Table.cur.role or "") ~= ui.modeKey then applyMode(mode) end
+    updatePointsBtn()
     if mode == "lobby" then
         ui.renderLobby()
         return
     end
+    updateColors()
     local m = Game.match
     local t = Table.cur
     setEnabled(ui.playBtn, Table.canStart())
@@ -487,25 +710,32 @@ function ui.render(now)
     end
     if not m then
         local n1, n2 = Table.names()
+        for _, dot in ipairs(ui.trail) do dot:Hide() end
         for seat = 1, 2 do
             place(ui.paddles[seat], Sim.PADDLE_X[seat], Sim.H / 2)
+            paintPaddle(seat)
             ui.ghosts[seat]:Hide()
             ui.scores[seat]:SetText("0")
         end
         ui.names[1]:SetText(n1 or "")
         ui.names[2]:SetText(n2 or "")
         ui.ball:Hide()
+        ui.rally:SetText("")
         local status, hint = Table.status()
         ui.status:SetText(status or "")
         ui.hint:SetText(hint or "")
         return
     end
 
+    steer()
+    local ghosts = ns.opt("ghosts")
     for seat = 1, 2 do
         local y = Sim.paddleY(m, seat, now)
         place(ui.paddles[seat], Sim.PADDLE_X[seat], y)
+        paintPaddle(seat)
         local target = m.paddles[seat].target
-        if math.abs(target - y) > 0.5 then
+        local wanted = ghosts == "both" or (ghosts == "mine" and seat == Game.humanSeat)
+        if wanted and math.abs(target - y) > 0.5 then
             place(ui.ghosts[seat], Sim.PADDLE_X[seat], target)
             ui.ghosts[seat]:Show()
         else
@@ -529,8 +759,10 @@ function ui.render(now)
         place(ui.ball, bx, by)
         ui.ball:Show()
     end
+    drawTrail(m, t)
 
     ui.status:SetText(statusText(m, now))
+    ui.rally:SetText(rallyText(m))
     if m.phase == "countdown" and Game.humanSeat then
         ui.hint:SetText("Click the board to move your paddle. First to " .. m.pointsToWin .. ".")
     elseif m.phase == "over" and Table.canStart() then
@@ -560,14 +792,15 @@ end
 function ui.startPractice(level)
     Table.leave(true)
     level = level or ns.db.level or "normal"
-    Game.startLocal({ { kind = "human" }, { kind = "bot", level = level } })
+    Game.startLocal({ { kind = "human" }, { kind = "bot", level = level } }, ns.opt("points"))
     ui.show()
 end
 
 function ui.startDemo(level1, level2)
     Table.leave(true)
     local level = ns.db.level or "normal"
-    Game.startLocal({ { kind = "bot", level = level1 or level }, { kind = "bot", level = level2 or level } })
+    Game.startLocal({ { kind = "bot", level = level1 or level }, { kind = "bot", level = level2 or level } },
+        ns.opt("points"))
     ui.show()
 end
 
@@ -585,6 +818,19 @@ ns.commands.demo = function(arg)
     ui.startDemo(parseLevel(a), parseLevel(b))
 end
 ns.commands.stop = function() Game.stop() end
+ns.commands.points = function(arg)
+    local n = tonumber(arg)
+    local ok = false
+    for _, v in ipairs(POINTS_CHOICES) do
+        if v == n then ok = true end
+    end
+    if not ok then
+        ns.print("usage: /pong points 1|3|5|7 (now first to " .. ns.opt("points") .. ")")
+        return
+    end
+    ns.Options.set("points", n)
+    ns.print("matches you host or practice are now first to " .. n)
+end
 -- Table commands open the window too.
 for _, name in ipairs({ "host", "join", "watch", "bot", "start", "invite" }) do
     local fn = ns.commands[name]
@@ -597,3 +843,4 @@ table.insert(ns.help, 1, "/pong - open the lobby (or close the window)")
 table.insert(ns.help, 2, "/pong practice [easy|normal|hard] - play against a bot")
 table.insert(ns.help, 3, "/pong demo [level] [level] - watch two bots play")
 table.insert(ns.help, 4, "/pong stop - end the current match")
+table.insert(ns.help, 5, "/pong points 1|3|5|7 - match length for your table and practice")

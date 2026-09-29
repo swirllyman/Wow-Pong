@@ -33,6 +33,16 @@ ball will arrive is the skill.
      Answers: accepted / declined / busy (mid-match) / different version / no answer after 15s.
 
 6. **Gold bets**, done and tested headlessly, **not yet tried in-game** (see "Bets" below). Protocol version 3.
+7. **Options**, done and tested headlessly, **not yet tried in-game** (see "Options" below). No protocol change.
+8. **Match length and rally counter**, done and tested headlessly, **not yet tried in-game**. Protocol version 4.
+   - First to 1/3/5/7: one setting (`ns.opt("points")`) for the table you host, Practice and Watch Bots. Header
+     button top-left of the window (left-click next, right-click back; enabled in the lobby, for a host between
+     matches and after a local match; otherwise shows the length in play / the host's next one), `/pong points
+     <n>`, Options > Play > Match length. START carries `win`; T carries `points` (the match in progress, else the
+     next one); snapshots carry it and the longest rally. Lobby rows say "first to N" / "(to N)". Changing it
+     does not touch bets (the user's choice); the bets panel subtitle shows it.
+   - Rally counter: "Rally N" at the bottom of the board while in play (Sim `m.hits`), "Longest rally: N" after the
+     match (`m.longest`). Stats keep the longest rally vs players (`human.bestRally`) and per bot level.
 
 All planned steps are built. Next: real in-game testing with a guildmate, then tuning.
 
@@ -41,7 +51,7 @@ All planned steps are built. Next: real in-game testing with a guildmate, then t
 - Lobby on a hidden custom channel; many tables. Each paddle's owner judges hit/miss for their own paddle; the
   table host serves and ends the match. Disconnect/reload/leave = instant forfeit. Combat changes nothing.
 - Fixed board for everyone (seat 1 always left). Everyone sees both players' target markers (ghost paddles).
-- First to 7. Hit position sets the exit angle (up to 60 degrees), the ball speeds up per hit up to a cap.
+- First to 7 by default; the host picks 1/3/5/7. Hit position sets the exit angle (up to 60 degrees), the ball speeds up per hit up to a cap.
 - Bot runs on the host, is spectatable, Easy/Normal/Hard. Either seated player presses Play Now (3s countdown).
 - Results only in the Pong UI, never chat. No sounds.
 - Lobby: table list with inline Sit/Watch; the table's creator always sits in seat 1; idle tables close after
@@ -104,6 +114,23 @@ All planned steps are built. Next: real in-game testing with a guildmate, then t
 - UI: side panel right of the window at a table (status, offers with Take/Cancel, side + gold + Bet); lobby
   "Ledger" view with Settled buttons; `/pong ledger`.
 
+## Options (`Options.lua`, `OptionsUI.lua`)
+
+- Model: `WoWPongDB.opts` holds only values that differ from `Options.defaults`; read with `ns.opt(key)`, change
+  with `Options.set` (fires `Options.listeners`; UI.lua's listener calls `ui.applyOptions`). Bot level, minimap
+  hide/lock and echo keep their old homes (`ns.db.level`, `ns.db.minimap`, `ns.db.echo`); their rows use custom
+  get/set.
+- Dialog `WoWPongOptions` with tabs Display / Play / Social / General, rows built from `SPECS` (toggle, choice
+  cycling with right-click back, `< value >` range, action button; dangerous ones need a second click within 4s).
+  Opened by the lobby Options button, `/pong options|config|settings`, middle/shift-click on the minimap button or
+  compartment, and a Settings > AddOns canvas page with an "Open" button (pcalled; logs if no Settings API).
+- Everything is local: window scale/lock, paddle colors (blue/red, me vs them, class, retro), target markers
+  (both/mine/off), ball trail (analytic `Sim.ballPos` at earlier times, stops at the last hit), hit flash, board
+  darkness, center line, match length (see step 8), hold to steer (MOVE at most every
+  0.25s networked / 0.05s local, 6+ units apart), auto-open on join/START, invites (ask / friends & guild / decline
+  all; auto-declines answer "no"), new-table chat notice (quiet for 45s after login and 5s after our own Q), hide
+  other-version tables, bets panel, trade assist fill-in.
+
 ## Layout
 
 | Path | What |
@@ -112,6 +139,8 @@ All planned steps are built. Next: real in-game testing with a guildmate, then t
 | `WoWPong/Libs/` | LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0 (minor 56), copied from the user's retail BigWigs/WeakAuras. Third-party: never edit; the fake client skips them |
 | `WoWPong/Media/icon.tga` | 64x64 addon icon (generated) |
 | `WoWPong/Core.lua` | Namespace, `ns.isSecret/show`, saved log (`ns.log`), event dispatch (`ns.on`), `/pong` dispatcher (`ns.commands`, `ns.help`), `ns.onLoaded` |
+| `WoWPong/Options.lua` | Options model: defaults, `ns.opt`, `Options.set/reset`, listeners (loads right after Core) |
+| `WoWPong/OptionsUI.lua` | Options dialog (tabs, SPECS, controls), Settings > AddOns page, `/pong options` |
 | `WoWPong/Codec.lua` | Pure wire format: events (`encodeEvent`/`decodeEvent`/`normalize`), match snapshots (`encodeSnapshot`/`decodeSnapshot`), `pack`, `split` |
 | `WoWPong/Sim.lua` | The deterministic simulation (above) |
 | `WoWPong/Bot.lua` | Bots: react after a delay, guess the arrival point with difficulty-based error, optional correction click, aim off-centre for angles. They emit ordinary MOVE events |
@@ -130,6 +159,8 @@ All planned steps are built. Next: real in-game testing with a guildmate, then t
 | `tools/fakewow.py` | Fake WoW client (lupa) adapted from AzerothWordle: loads the real files in .toc order; `run(sec, fps)` fires OnUpdate on shown frames, `click_board(y)`, per-client `start_time`, the client's addon-message throttle |
 | `tools/test_net.py` | Several fake clients through a simulated channel with latency/jitter/disconnects: codec, join + clock sync, full matches all clients agree on, 300ms latency, forfeits, host leaving/vanishing, keepalive, bot table, full table, version mismatch, ping, late spectators (snapshots, buffering, lost snapshots) |
 | `tools/test_sim.py` | Sim + Bot unit tests, event replay, full bot matches at every level with a balance report |
+| `tools/test_match_length.py` | START target, codec/snapshot fields, header button and `/pong points`, practice to 1, rally text, longest rally in stats, host's choice reaching guest/lobby/late spectator, locked mid-match |
+| `tools/test_options.py` | Opening the dialog every way, tabs/controls, each option's effect, confirm buttons, restore defaults, what's saved |
 | `tools/test_ui.py` | Drives the window: open/close, practice with clicks, bot win, demo to 7, stop, level cycling |
 
 ## Working on it
@@ -140,7 +171,7 @@ All planned steps are built. Next: real in-game testing with a guildmate, then t
 - **Log:** `WoWPongDB.log`, written on reload/logout to `…\_classic_beta_\WTF\Account\<account>\SavedVariables\WoWPong.lua`.
   `/pong log [n]`, `/pong echo`.
 - **Tests:** `pip install lupa`, then `python tools/test_sim.py`, `test_ui.py`, `test_net.py` (a few minutes) and
-  `test_extras.py`. Each fake client seeds `math.random` from its name, so runs are reproducible; set
+  `test_extras.py`, `test_bets.py`, `test_options.py`, `test_match_length.py`. Each fake client seeds `math.random` from its name, so runs are reproducible; set
   `WOWPONG_SEED=<n>` to try other runs (timing races show up only under some seeds; check a few before
   committing networking changes). lupa runs Lua 5.5; addon code must stay Lua 5.1.
 - **Forever quirks** (see `../AzerothWordle/CLAUDE.md` for the full list and the comms probe): secret values

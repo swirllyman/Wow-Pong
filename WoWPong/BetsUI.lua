@@ -56,6 +56,7 @@ local function buildPanel()
     sub:SetPoint("TOP", title, "BOTTOM", 0, -3)
     sub:SetTextColor(0.7, 0.7, 0.7)
     sub:SetText("even money - settled by trade")
+    ui.betSub = sub
 
     ui.betStatus = L.newText(p, 11)
     ui.betStatus:SetPoint("TOPLEFT", p, "TOPLEFT", 16, -54)
@@ -144,6 +145,7 @@ function ui.renderBets()
     local result = Bets.results[t.host]
     if result and open then status = status .. "\n|cffffd100" .. result .. "|r" end
     ui.betStatus:SetText(status)
+    ui.betSub:SetText("first to " .. (Table.points() or "?") .. " - even money, settled by trade")
 
     local offers = Bets.offers()
     for i, row in ipairs(ui.offerRows) do

@@ -118,6 +118,8 @@ function methods.Disable(self) self.disabled = true end
 function methods.IsEnabled(self) return not self.disabled end
 function methods.SetMultiLine(self, v) self.multiline = v end
 function methods.GetEffectiveScale(self) return 1 end
+function methods.SetScale(self, v) self.scale = v end
+function methods.GetScale(self) return self.scale or 1 end
 function methods.GetBottom(self) return 0 end
 cursorY = 0
 function GetCursorPosition() return 0, cursorY end
@@ -226,6 +228,7 @@ function GetPlayerInfoByGUID(guid)
     if who then return "Mage", "MAGE", "Human", "Human", 2, who.name, "" end
 end
 PEERS = {}
+RAID_CLASS_COLORS = { MAGE = { r = 0.25, g = 0.78, b = 0.92 } }
 function GetRealmName() return ME.nrealm end
 function GetNormalizedRealmName() return ME.nrealm end
 function Ambiguate(n, mode) return (n:gsub("%-.*$", "")) end

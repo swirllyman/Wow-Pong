@@ -3,9 +3,10 @@
 --
 -- Messages (fields after the type; pids are Net.pid() ids, "v" is Net.VERSION):
 --   Q;v                                    who's hosting? hosts answer with T
---   T;v;host;hostName;s1pid;s1name;s2pid;s2name;state;score1;score2;matchNo
+--   T;v;host;hostName;s1pid;s1name;s2pid;s2name;state;score1;score2;matchNo;points
 --                                          table state (s2pid "bot:<level>" for a bot, "" when free; state is
---                                          open / ready / playing / over). Sent on changes, each point, every 30s
+--                                          open / ready / playing / over; points: first to this many, the match
+--                                          being played or else the next one). Sent on changes, each point, every 30s
 --   J;v;host;pid;name                      ask to sit in seat 2
 --   L;host;pid                             leave the table (a player leaving mid-match forfeits)
 --   X;host                                 host closed the table
@@ -103,13 +104,23 @@ local function tableState(t)
     return t.seats[2] and "ready" or "open", nil
 end
 
+-- Points to win at this table: the match in progress, or else the host's setting for the next one.
+function Table.points()
+    local t = Table.cur
+    if not t then return nil end
+    local m = Game.networked and Game.match
+    if m and m.phase ~= "over" then return m.pointsToWin end
+    if t.role == "host" then return ns.opt("points") end
+    return t.points or Sim.POINTS_TO_WIN
+end
+
 local function announce()
     local t = Table.cur
     if not t or t.role ~= "host" then return end
     local state, m = tableState(t)
     Net.sendLow(Net.msg("T", Net.VERSION, t.host, t.hostName, seatPid(t.seats[1]), seatName(t.seats[1]),
         seatPid(t.seats[2]), seatName(t.seats[2]), state, m and m.score[1] or 0, m and m.score[2] or 0,
-        t.matchNo), "T")
+        t.matchNo, Table.points()), "T")
     t.lastAnnounce = GetTime()
     t.announceAt = nil
 end
@@ -182,7 +193,7 @@ function Table.start()
     end
     if t.role == "host" then
         beginMatch(t, t.matchNo + 1)
-        Game.push({ type = "START", t = Game.clock() })
+        Game.push({ type = "START", t = Game.clock(), win = ns.opt("points") })
         ns.log("net match " .. t.matchNo .. ": " .. Game.names[1] .. " vs " .. Game.names[2])
     else
         Net.send(Net.msg("R", t.host, me()))
@@ -197,6 +208,11 @@ Game.listeners[#Game.listeners + 1] = function(ev)
     if ev.type == "START" or ev.type == "MISS" or ev.type == "FORFEIT" then announceSoon() end
     if ev.type == "START" or Game.match.phase == "over" then t.idleSince = GetTime() end
 end
+
+-- The host changing the match length re-announces the table (a match in progress keeps its own).
+table.insert(ns.Options.listeners, function(key)
+    if key == "points" or key == nil then announceSoon() end
+end)
 
 -- Local events of a networked match wait here until the send policy lets them out.
 Game.onLocalEvent = function(ev)
@@ -361,6 +377,7 @@ end
 local function adopt(info, role)
     local t = newTable(role, info.host, info.hostName)
     t.seats = { info.seats[1], info.seats[2] }
+    t.points = info.points
     -- Between matches, carry on the host's match count (bets are for matchNo + 1). Mid-match, the snapshot or the
     -- next START sets it.
     if info.state ~= "playing" and info.state ~= "over" then t.matchNo = info.matchNo or 0 end
@@ -491,12 +508,15 @@ H.T = function(f, now)
     local info = { version = tonumber(f[2]), host = host, hostName = f[4] or "?",
         seats = { parseSeat(f[5], f[6]), parseSeat(f[7], f[8]) }, heardAt = now,
         state = f[9] or "open", score = { tonumber(f[10]) or 0, tonumber(f[11]) or 0 },
-        matchNo = tonumber(f[12]) or 0 }
+        matchNo = tonumber(f[12]) or 0, points = tonumber(f[13]) or Sim.POINTS_TO_WIN }
+    local new = Table.known[host] == nil
     Table.known[host] = info
+    if new and Table.onTableSeen then Table.onTableSeen(info, now) end
     local t = Table.cur
     if not t or t.host ~= host or t.role == "host" then return end
     heard(t, host, now)
     t.seats = info.seats
+    t.points = info.points
     if t.role == "guest" then
         local s2 = t.seats[2]
         if s2 and s2.pid == me() then
@@ -536,6 +556,7 @@ H.J = function(f, now)
     if changed then seatsChanged(t) end
     announce()
     say(name .. " joined your table")
+    if changed and Table.onGuestJoined then Table.onGuestJoined(t) end
 end
 
 H.L = function(f)
@@ -783,13 +804,17 @@ function Table.names()
     return seatName(t.seats[1]), seatName(t.seats[2])
 end
 
--- One-line summary of a listed table's state, e.g. "Playing 3-2".
+-- One-line summary of a listed table's state, e.g. "Playing 3-2 (to 5)" or "Open seat, first to 7".
 function Table.describe(info)
-    local s = info.score
-    if info.state == "playing" then return string.format("Playing %d-%d", s[1], s[2]) end
-    if info.state == "over" then return string.format("Finished %d-%d", s[1], s[2]) end
-    if info.state == "ready" then return "Ready" end
-    return "Open seat"
+    local s, points = info.score, info.points or Sim.POINTS_TO_WIN
+    if info.state == "playing" then return string.format("Playing %d-%d (to %d)", s[1], s[2], points) end
+    local state = "Open seat"
+    if info.state == "over" then
+        state = string.format("Finished %d-%d", s[1], s[2])
+    elseif info.state == "ready" then
+        state = "Ready"
+    end
+    return string.format("%s, first to %d", state, points)
 end
 
 local function printList()

@@ -450,7 +450,7 @@ ns.on("TRADE_SHOW", function()
     if not e or e.balance == 0 then return end
     if e.balance < 0 then
         local owed = -e.balance
-        local ok = type(SetTradeMoney) == "function" and pcall(SetTradeMoney, owed)
+        local ok = ns.opt("tradeAssist") and type(SetTradeMoney) == "function" and pcall(SetTradeMoney, owed)
         say(string.format("you owe %s %s from Pong bets%s", name, Bets.money(owed),
             ok and " - it's in the trade window" or ""))
     else

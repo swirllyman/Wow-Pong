@@ -47,7 +47,7 @@ end
 -- Starts a new match. opts = {
 --   names = { name1, name2 }, seats = { [seat] = true if this client judges it }, host = bool,
 --   humanSeat = seat or nil, bots = { [seat] = level }, base = clock base, networked = bool,
---   opponent = see Game.opponent }
+--   opponent = see Game.opponent }  (points to win come with the START event)
 function Game.begin(opts)
     Game.match = Sim.newMatch()
     Game.names = opts.names
@@ -62,8 +62,9 @@ function Game.begin(opts)
     driver:Show()
 end
 
--- Starts a local match. seatDefs[i] = { kind = "human" } or { kind = "bot", level = "easy"|"normal"|"hard" }.
-function Game.startLocal(seatDefs)
+-- Starts a local match. seatDefs[i] = { kind = "human" } or { kind = "bot", level = "easy"|"normal"|"hard" };
+-- pointsToWin is optional (default Sim.POINTS_TO_WIN).
+function Game.startLocal(seatDefs, pointsToWin)
     local names, bots, humanSeat = {}, {}, nil
     for seat, def in ipairs(seatDefs) do
         if def.kind == "bot" then
@@ -78,7 +79,7 @@ function Game.startLocal(seatDefs)
     local opponent = humanSeat and bots[3 - humanSeat] and { kind = "bot", level = bots[3 - humanSeat] } or nil
     Game.begin({ names = names, seats = { true, true }, host = true, humanSeat = humanSeat, bots = bots,
         opponent = opponent })
-    Game.push({ type = "START", t = Game.clock() })
+    Game.push({ type = "START", t = Game.clock(), win = pointsToWin or Sim.POINTS_TO_WIN })
     ns.log("local match: " .. names[1] .. " vs " .. names[2])
 end
 

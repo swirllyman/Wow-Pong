@@ -10,7 +10,7 @@ ns.Codec = Codec
 
 -- type -> { code, fields }, and code -> type
 local FORMATS = {
-    START = { "A", { "t" } },
+    START = { "A", { "t", "win" } },
     SERVE = { "S", { "t", "dir", "angle" } },
     MOVE = { "M", { "t", "seat", "y" } },
     HIT = { "H", { "t", "seat", "x", "y", "vx", "vy", "speed" } },
@@ -21,7 +21,7 @@ local BY_CODE = {}
 for kind, f in pairs(FORMATS) do BY_CODE[f[1]] = kind end
 
 -- Decimal places per field (default 2).
-local PRECISION = { t = 3, angle = 4, seat = 0, dir = 0 }
+local PRECISION = { t = 3, angle = 4, seat = 0, dir = 0, win = 0 }
 
 function Codec.num(v, places)
     local s = string.format("%." .. places .. "f", v)
@@ -77,14 +77,15 @@ function Codec.encodeSnapshot(m)
         m.serveDir or 0, m.hits, m.winner or 0, m.forfeit and 1 or 0,
         n(b.x, 2), n(b.y, 2), n(b.vx, 2), n(b.vy, 2), n(b.speed, 2), n(b.t, 3),
         n(p1.y, 2), n(p1.target, 2), n(p1.t, 3), n(p2.y, 2), n(p2.target, 2), n(p2.t, 3),
+        m.pointsToWin, m.longest,
     }, ",")
 end
 
 function Codec.decodeSnapshot(s)
     local f = Codec.split(s, ",")
-    if #f ~= 20 or not PHASE_BY_CODE[f[1]] then return nil end
+    if #f ~= 22 or not PHASE_BY_CODE[f[1]] then return nil end
     local v = {}
-    for i = 2, 20 do
+    for i = 2, 22 do
         if i ~= 4 then
             v[i] = tonumber(f[i])
             if not v[i] then return nil end
@@ -96,6 +97,7 @@ function Codec.decodeSnapshot(s)
         hits = v[6], winner = v[7] ~= 0 and v[7] or nil, forfeit = v[8] == 1,
         ball = { x = v[9], y = v[10], vx = v[11], vy = v[12], speed = v[13], t = v[14] },
         paddles = { { y = v[15], target = v[16], t = v[17] }, { y = v[18], target = v[19], t = v[20] } },
+        pointsToWin = v[21], longest = v[22],
     }
 end
 

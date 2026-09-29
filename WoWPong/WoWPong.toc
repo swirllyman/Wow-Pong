@@ -14,6 +14,7 @@ Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
 Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
 
 Core.lua
+Options.lua
 Codec.lua
 Sim.lua
 Bot.lua
@@ -26,3 +27,4 @@ Invite.lua
 UI.lua
 BetsUI.lua
 Minimap.lua
+OptionsUI.lua

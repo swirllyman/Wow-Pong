@@ -88,6 +88,21 @@ local function sitAt(host, tries)
     end
 end
 
+-- Whether a player id is on our friends list, in our guild or a Battle.net friend's character (the "friends &
+-- guild only" invite option). Each API is optional and pcalled; unknown counts as a stranger.
+local function asks(fn, ...)
+    if type(fn) ~= "function" then return false end
+    local ok, r = pcall(fn, ...)
+    return ok and r and not ns.isSecret(r) and true or false
+end
+
+function Invite.isFriend(pid)
+    local guid = "Player-" .. pid
+    return asks(C_FriendList and C_FriendList.IsFriend, guid)
+        or asks(IsGuildMember, guid)
+        or asks(C_BattleNet and C_BattleNet.GetAccountInfoByGUID, guid)
+end
+
 local H = Net.handlers
 
 H.V = function(f)
@@ -99,6 +114,12 @@ H.V = function(f)
     end
     if seatedInMatch() then
         answer(fromPid, "busy")
+        return
+    end
+    local mode = ns.opt("invites")
+    if mode == "none" or (mode == "friends" and not Invite.isFriend(fromPid)) then
+        ns.log("invite from " .. fromName .. " declined automatically (" .. mode .. ")")
+        answer(fromPid, "no")
         return
     end
     ns.log("invite from " .. fromName)

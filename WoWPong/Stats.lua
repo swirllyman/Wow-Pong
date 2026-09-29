@@ -8,11 +8,11 @@ local Game, Bot = ns.Game, ns.Bot
 local Stats = {}
 ns.Stats = Stats
 
-local HEAD_TO_HEAD_SHOWN = 8
+local HEAD_TO_HEAD_SHOWN = 7
 
 local function blankHuman()
     return { wins = 0, losses = 0, forfeitWins = 0, forfeitLosses = 0, streak = 0, bestStreak = 0,
-        pointsFor = 0, pointsAgainst = 0 }
+        pointsFor = 0, pointsAgainst = 0, bestRally = 0 }
 end
 
 -- The stats table, created and filled in with defaults as needed.
@@ -21,8 +21,12 @@ function Stats.data()
     c.stats = c.stats or {}
     local s = c.stats
     s.human = s.human or blankHuman()
+    s.human.bestRally = s.human.bestRally or 0
     s.bots = s.bots or {}
-    for _, level in ipairs(Bot.LEVELS) do s.bots[level] = s.bots[level] or { wins = 0, losses = 0 } end
+    for _, level in ipairs(Bot.LEVELS) do
+        s.bots[level] = s.bots[level] or { wins = 0, losses = 0 }
+        s.bots[level].bestRally = s.bots[level].bestRally or 0
+    end
     s.opponents = s.opponents or {}   -- pid -> { name, wins, losses, last = server time }
     return s
 end
@@ -36,6 +40,7 @@ function Stats.record(m, seat, opponent)
         local b = s.bots[opponent.level]
         if not b then return end
         if won then b.wins = b.wins + 1 else b.losses = b.losses + 1 end
+        b.bestRally = math.max(b.bestRally, m.longest or 0)
         return
     end
     local h = s.human
@@ -49,6 +54,7 @@ function Stats.record(m, seat, opponent)
         h.streak = 0
         if m.forfeit then h.forfeitLosses = h.forfeitLosses + 1 end
     end
+    h.bestRally = math.max(h.bestRally, m.longest or 0)
     h.pointsFor = h.pointsFor + m.score[seat]
     h.pointsAgainst = h.pointsAgainst + m.score[3 - seat]
     if opponent.pid then
@@ -90,6 +96,12 @@ function Stats.lines()
         bots[#bots + 1] = string.format("%s %d-%d", Bot.NAMES[level], b.wins, b.losses)
     end
     lines[#lines + 1] = "Vs bots: " .. table.concat(bots, "    ")
+    local rallies = {}
+    for _, level in ipairs(Bot.LEVELS) do
+        rallies[#rallies + 1] = string.format("%s %d", Bot.NAMES[level], s.bots[level].bestRally)
+    end
+    lines[#lines + 1] = string.format("Longest rally: %d vs players    vs bots: %s", h.bestRally,
+        table.concat(rallies, "  "))
 
     local opponents = {}
     for _, o in pairs(s.opponents) do opponents[#opponents + 1] = o end
