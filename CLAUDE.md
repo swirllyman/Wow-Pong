@@ -74,8 +74,12 @@ All planned steps are built. Next: real in-game testing with a guildmate, then t
 - `Sim.step(m, now, auth)` creates the events this client is responsible for: the host serves (random angle via
   `auth.rand`), and owners of `auth.seats` judge arrivals at the exact arrival time. HIT events carry the new ball
   path, so other clients never recompute the physics and float differences can't desync them.
-- While in play the UI holds the ball at the paddle face until the verdict arrives, so network lag will show as a
-  brief pause, never as the ball passing through a paddle.
+- Drawing is display-only and never changes the match (UI.lua `ballView`/`smoothBall`). With "Smooth network lag"
+  (`smoothLag`, default on), a ball reaching a paddle someone else judges bounces at once: we run `Sim.judge` on
+  our (stale) view of that paddle and draw the predicted path, for at most `PREDICT_MAX` (0.5s). A predicted miss
+  holds the ball at the face instead. When the real verdict arrives, the ball runs fast along the real path from
+  where it stopped until it catches up (`CATCHUP_TIME`), and any remaining offset fades over `SMOOTH_TIME`.
+  Serves snap. With the option off, the ball simply waits at the face and then jumps.
 - Board is 480x300 units drawn 1:1; tuning constants are at the top of Sim.lua. `tools/test_sim.py` prints a bot
   balance report; retune after playtests.
 
@@ -92,12 +96,13 @@ All planned steps are built. Next: real in-game testing with a guildmate, then t
   everyone else applies FORFEIT for seat 1 locally.
 - Throttle: our token bucket (8 burst, 0.9/s) stays under the client's (10, 1/s). Send priority: the normal queue
   (control messages, sealed snapshot events) first, then match events (non-MOVE at once; MOVEs batch while
-  tokens < 4, max 0.25s wait), then the low queue (`Net.sendLow`: T announcements, Q, K keepalives; only when 2+
+  tokens < 4, max 0.25s wait, and never take the last token, which stays free for the next HIT/MISS/SERVE: without
+  that, host HITs reached the guest 0.6s late on average at 0.25s latency), then the low queue (`Net.sendLow`: T announcements, Q, K keepalives; only when 2+
   tokens remain, or 1 once it has waited 3s; newer message with the same key replaces a queued one). A late MOVE is still applied after the
   match is over, so paddles end in sync. A bot-vs-bot networked match uses ~1 message/s per player, right
   at the limit: check `/pong net` (throttled count) in real playtests.
 - Latency costs the receiving player reaction time (the opponent's hit shows up late and the ball jumps ahead);
-  that's the fair, symmetric choice. Visual smoothing of the jump is a possible polish item.
+  that's the fair, symmetric choice. Prediction and smoothing (above) hide the jump but can't give that time back.
 
 ## Bets (`Bets.lua`, `BetsUI.lua`)
 
@@ -126,7 +131,7 @@ All planned steps are built. Next: real in-game testing with a guildmate, then t
   compartment, and a Settings > AddOns canvas page with an "Open" button (pcalled; logs if no Settings API).
 - Everything is local: window scale/lock, paddle colors (blue/red, me vs them, class, retro), target markers
   (both/mine/off), ball trail (analytic `Sim.ballPos` at earlier times, stops at the last hit), hit flash, board
-  darkness, center line, match length (see step 8), hold to steer (MOVE at most every
+  darkness, center line, match length (see step 8), smooth network lag (see the simulation section), hold to steer (MOVE at most every
   0.25s networked / 0.05s local, 6+ units apart), auto-open on join/START, invites (ask / friends & guild / decline
   all; auto-declines answer "no"), new-table chat notice (quiet for 45s after login and 5s after our own Q), hide
   other-version tables, bets panel, trade assist fill-in.
@@ -160,6 +165,7 @@ All planned steps are built. Next: real in-game testing with a guildmate, then t
 | `tools/test_net.py` | Several fake clients through a simulated channel with latency/jitter/disconnects: codec, join + clock sync, full matches all clients agree on, 300ms latency, forfeits, host leaving/vanishing, keepalive, bot table, full table, version mismatch, ping, late spectators (snapshots, buffering, lost snapshots) |
 | `tools/test_sim.py` | Sim + Bot unit tests, event replay, full bot matches at every level with a balance report |
 | `tools/test_match_length.py` | START target, codec/snapshot fields, header button and `/pong points`, practice to 1, rally text, longest rally in stats, host's choice reaching guest/lobby/late spectator, locked mid-match |
+| `tools/test_smoothing.py` | Smooth network lag: the guest draws the host's bounce before the HIT arrives, no teleports with it on (vs 10+ off), a predicted miss waits at the face, both clients agree on the match |
 | `tools/test_options.py` | Opening the dialog every way, tabs/controls, each option's effect, confirm buttons, restore defaults, what's saved |
 | `tools/test_ui.py` | Drives the window: open/close, practice with clicks, bot win, demo to 7, stop, level cycling |
 
@@ -175,7 +181,7 @@ All planned steps are built. Next: real in-game testing with a guildmate, then t
 - **Log:** `WoWPongDB.log`, written on reload/logout to `…\_classic_beta_\WTF\Account\<account>\SavedVariables\WoWPong.lua`.
   `/pong log [n]`, `/pong echo`.
 - **Tests:** `pip install lupa`, then `python tools/test_sim.py`, `test_ui.py`, `test_net.py` (a few minutes) and
-  `test_extras.py`, `test_bets.py`, `test_options.py`, `test_match_length.py`. Each fake client seeds `math.random` from its name, so runs are reproducible; set
+  `test_extras.py`, `test_bets.py`, `test_options.py`, `test_match_length.py`, `test_smoothing.py`. Each fake client seeds `math.random` from its name, so runs are reproducible; set
   `WOWPONG_SEED=<n>` to try other runs (timing races show up only under some seeds; check a few before
   committing networking changes). lupa runs Lua 5.5; addon code must stay Lua 5.1.
 - **Forever quirks** (see `../AzerothWordle/CLAUDE.md` for the full list and the comms probe): secret values

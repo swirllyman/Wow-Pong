@@ -22,7 +22,7 @@ Sim.PADDLE_W, Sim.PADDLE_H = 8, 60
 Sim.PADDLE_INSET = 16            -- gap between the board edge and the back of a paddle
 Sim.BALL_R = 5                   -- half the ball's size (it's drawn as a square)
 -- Speeds were tuned with bot-vs-bot runs (tools/test_sim.py prints a balance report); retune after playtests.
-Sim.PADDLE_SPEED = 200           -- units/s toward the clicked target
+Sim.PADDLE_SPEED = 270           -- units/s toward the clicked target
 Sim.BALL_SPEED = 240             -- serve speed, units/s
 Sim.BALL_SPEEDUP = 1.12          -- speed multiplier per paddle hit
 Sim.BALL_SPEED_MAX = 650
@@ -89,11 +89,15 @@ function Sim.paddleY(m, seat, t)
     return d > 0 and p.y + travel or p.y - travel
 end
 
--- Ball centre at time t on its current path (bouncing off the top and bottom walls).
-function Sim.ballPos(m, t)
-    local b = m.ball
+-- Ball centre at time t on path b ({ x, y, vx, vy, t }, e.g. m.ball or a HIT event), bouncing off the walls.
+function Sim.pathPos(b, t)
     local dt = math.max(0, t - b.t)
     return b.x + b.vx * dt, Sim.fold(b.y + b.vy * dt, Sim.BALL_R, Sim.H - Sim.BALL_R)
+end
+
+-- Ball centre at time t on its current path.
+function Sim.ballPos(m, t)
+    return Sim.pathPos(m.ball, t)
 end
 
 -- The seat the ball is heading for and when it reaches that paddle's face, or nil when the ball isn't in play.

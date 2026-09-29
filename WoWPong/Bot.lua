@@ -17,9 +17,10 @@ Bot.NAMES = { easy = "Easy", normal = "Normal", hard = "Hard" }
 -- aim: how far off-centre (fraction of half a paddle) it tries to meet the ball, to send it at an angle.
 -- recenter: drifts back toward the middle while the ball is heading away.
 Bot.PROFILES = {
-    easy = { reaction = 0.45, error = 45, correction = nil, aim = 0, recenter = false },
-    normal = { reaction = 0.30, error = 26, correction = 0.5, aim = 0.3, recenter = true },
-    hard = { reaction = 0.16, error = 10, correction = 0.6, aim = 0.7, recenter = true },
+-- Reactions were raised ~0.12s when paddles got 35% faster (200 -> 270), which kept the hits per point the same.
+    easy = { reaction = 0.58, error = 45, correction = nil, aim = 0, recenter = false },
+    normal = { reaction = 0.42, error = 26, correction = 0.5, aim = 0.3, recenter = true },
+    hard = { reaction = 0.28, error = 10, correction = 0.6, aim = 0.7, recenter = true },
 }
 
 local methods = {}

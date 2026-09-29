@@ -25,6 +25,9 @@ local TRAIL_MAX, TRAIL_GAP = 8, 0.018           -- trail dots and the time betwe
 local TRAIL_LEN = { off = 0, short = 4, long = TRAIL_MAX }
 local FLASH_TIME = 0.18                         -- seconds a paddle glows after a hit
 local STEER_GAP, STEER_GAP_NET, STEER_MIN = 0.05, 0.25, 6   -- hold to steer: min seconds / units between moves
+local PREDICT_MAX = 0.5                         -- seconds a predicted bounce may run before the real verdict
+local SMOOTH_TIME, SMOOTH_MAX = 0.2, 300        -- seconds to glide out a correction; larger jumps snap
+local CATCHUP_TIME, CATCHUP_MAX = 0.3, 0.8      -- seconds a late-released ball takes to catch up; longer waits snap
 local POINTS_CHOICES = { 1, 3, 5, 7 }           -- the match length button (header) cycles these
 
 ---------------------------------------------------------------------------
@@ -615,14 +618,15 @@ local function paintPaddle(seat)
     ui.paddles[seat]:SetColorTexture(c[1] + (1 - c[1]) * k, c[2] + (1 - c[2]) * k, c[3] + (1 - c[3]) * k, 1)
 end
 
--- Dots where the ball was a moment ago, back to its last paddle hit (or the serve).
-local function drawTrail(m, t)
+-- Dots where the ball was a moment ago on path b, back to its last paddle hit (or the serve), shifted like the ball.
+local function drawTrail(m, b, t, dx, dy)
     local n = (m.phase == "play" or m.phase == "point") and (TRAIL_LEN[ns.opt("trail")] or 0) or 0
     for i, dot in ipairs(ui.trail) do
         local tt = t - i * TRAIL_GAP
         local shown = false
-        if i <= n and tt > m.ball.t then
-            local x, y = Sim.ballPos(m, tt)
+        if i <= n and tt > b.t then
+            local x, y = Sim.pathPos(b, tt)
+            x, y = x + dx, y + dy
             if x >= 0 and x <= Sim.W then
                 place(dot, x, y)
                 shown = true
@@ -630,6 +634,65 @@ local function drawTrail(m, t)
         end
         setShown(dot, shown)
     end
+end
+
+-- Where to draw the ball: the path, the time on it, and a key that changes whenever the path does. In play the
+-- ball never runs past a paddle whose verdict is pending. With "smooth network lag" on, a ball reaching a paddle
+-- someone else judges doesn't wait for their verdict: we judge it from our (slightly stale) view of that paddle,
+-- and a predicted hit bounces at once along the predicted path. A predicted miss still waits at the face, since a
+-- miss can't be taken back gracefully. The real verdict replaces the prediction and smoothBall glides out the
+-- difference.
+local function ballView(m, now)
+    if m.phase ~= "play" then return m.ball, now, m.trajectory end
+    local seat, tA = Sim.arrival(m)
+    if now < tA or not ns.opt("smoothLag") then return m.ball, math.min(now, tA), m.trajectory end
+    local ev = Sim.judge(m, seat)
+    if ev.type ~= "HIT" then return m.ball, tA, m.trajectory end
+    if ui.predictedMatch ~= m or ui.predicted ~= m.trajectory then
+        ui.predictedMatch, ui.predicted = m, m.trajectory
+        ui.flash[seat] = GetTime()
+    end
+    return ev, math.min(now, tA + PREDICT_MAX), m.trajectory .. "p"
+end
+
+-- Takes the jumps out of the drawn ball when its path changes. Two parts, both eased out:
+--  * Catch-up: if the ball was stopped (waiting at a paddle face for a verdict we didn't predict, or at the end
+--    of a prediction that ran out) when the late verdict came, it leaves from there along the new path and runs
+--    fast until it's back in sync (over CATCHUP_TIME), bouncing off the walls like the real ball.
+--  * Offset: whatever distance remains (a predicted bounce a little off the real one) fades over SMOOTH_TIME.
+-- Serves and new matches snap. Returns the time to draw the path at and the offset to add.
+local function smoothBall(m, key, path, t, now)
+    local s = ui.smooth
+    if not s or s.match ~= m then
+        s = { match = m, dx = 0, dy = 0, lag = 0, at = now }
+        ui.smooth = s
+    elseif s.key ~= key then
+        local fresh = m.phase == "countdown" or (m.phase == "play" and m.hits == 0)
+        s.dx, s.dy, s.lag, s.at = 0, 0, 0, now
+        if ns.opt("smoothLag") and s.visible and not fresh then
+            local lag = s.heldAt and math.min(math.max(0, t - s.heldAt), CATCHUP_MAX) or 0
+            local x, y = Sim.pathPos(path, t - lag)
+            local dx, dy = s.x - x, s.y - y
+            if dx * dx + dy * dy < SMOOTH_MAX * SMOOTH_MAX then
+                s.lag, s.dx, s.dy = lag, dx, dy
+            end
+        end
+    end
+    s.key = key
+    -- Remember when the ball stopped (at a paddle face, or a prediction that ran out): that point is on, or close
+    -- to, the path the late verdict brings.
+    s.heldAt = t < now and t or nil
+    local function ease(len)
+        local p = math.min(1, math.max(0, (now - s.at) / len))
+        return 1 - p * p * (3 - 2 * p)   -- smoothstep: no sudden start or stop
+    end
+    local tDraw = t - s.lag * ease(CATCHUP_TIME)
+    local k = ease(SMOOTH_TIME)
+    local ox, oy = s.dx * k, s.dy * k
+    local x, y = Sim.pathPos(path, tDraw)
+    s.x, s.y = x + ox, y + oy
+    s.visible = s.x >= -Sim.BALL_R and s.x <= Sim.W + Sim.BALL_R
+    return tDraw, ox, oy
 end
 
 -- Hold to steer: while the button is down on the board, the target follows the cursor (rate-limited, more so in
@@ -651,7 +714,11 @@ local function steer()
 end
 
 Game.listeners[#Game.listeners + 1] = function(ev)
-    if ev.type == "HIT" then ui.flash[ev.seat] = GetTime() end
+    -- A hit we already predicted (and flashed) doesn't flash again.
+    if ev.type == "HIT" then
+        local m = Game.match
+        if not (m and ui.predictedMatch == m and ui.predicted == m.trajectory - 1) then ui.flash[ev.seat] = GetTime() end
+    end
     -- Your networked match starting (e.g. the guest pressed Play Now) opens the window if it was closed.
     if ev.type == "START" and Game.networked and Game.humanSeat and ns.opt("autoOpen") and ui.frame
         and not ui.frame:IsShown() then
@@ -745,21 +812,18 @@ function ui.render(now)
         ui.names[seat]:SetText(Game.names[seat] or "")
     end
 
-    -- In play the ball waits at a paddle's face until that seat's owner judges it, so it never visibly passes
-    -- through a paddle while a verdict is pending. After a miss it flies off the board.
-    local t = now
-    if m.phase == "play" then
-        local _, tA = Sim.arrival(m)
-        t = math.min(now, tA)
-    end
-    local bx, by = Sim.ballPos(m, t)
+    local path, t, key = ballView(m, now)
+    local dx, dy
+    t, dx, dy = smoothBall(m, key, path, t, now)
+    local bx, by = Sim.pathPos(path, t)
+    bx, by = bx + dx, by + dy
     if bx < -Sim.BALL_R or bx > Sim.W + Sim.BALL_R then
         ui.ball:Hide()
     else
         place(ui.ball, bx, by)
         ui.ball:Show()
     end
-    drawTrail(m, t)
+    drawTrail(m, path, t, dx, dy)
 
     ui.status:SetText(statusText(m, now))
     ui.rally:SetText(rallyText(m))

@@ -15,6 +15,7 @@ Options.defaults = {
     ghosts = "both",         -- target markers: both, mine, off
     trail = "off",           -- ball trail: off, short, long
     hitFlash = true,         -- paddles flash on a hit
+    smoothLag = true,        -- predict remote bounces and glide out ball corrections (display only)
     boardAlpha = 0.9,        -- board background opacity
     centerLine = true,
     -- Play

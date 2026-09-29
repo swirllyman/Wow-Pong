@@ -69,6 +69,10 @@ local SPECS = {
         { key = "holdToSteer", kind = "toggle", label = "Hold to steer",
             desc = "Hold the mouse button on the board and your paddle keeps heading for the cursor. "
                 .. "Off: each click sets one target." },
+        { key = "smoothLag", kind = "toggle", label = "Smooth network lag",
+            desc = "The ball bounces off the other player's paddle right away instead of waiting for their "
+                .. "client to confirm the hit, and late updates glide into place instead of jumping. "
+                .. "Only changes what you see, never the score." },
         { key = "autoOpen", kind = "toggle", label = "Open window for my matches",
             desc = "Opens the Pong window when someone sits at your table or your match starts." },
     },

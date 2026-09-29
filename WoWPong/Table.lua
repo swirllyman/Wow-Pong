@@ -35,6 +35,7 @@ local KEEPALIVE = 3         -- send K after this long without sending anything
 local SYNC_PINGS, SYNC_GAP, SYNC_WAIT = 3, 0.4, 4
 local MOVE_BATCH_AGE = 0.25 -- a lone MOVE waits at most this long for company when tokens are low
 local TOKEN_RESERVE = 4     -- below this many tokens, MOVEs are batched instead of sent at once
+local URGENT_RESERVE = 1    -- tokens a MOVE-only batch leaves for the next HIT/MISS/SERVE
 local ROOM = Net.MAX_BYTES - 40
 local ANNOUNCE_EVERY = 30   -- hosts re-send T this often so lobby lists stay fresh
 local EXPIRE = 75           -- a table not announced for this long drops off the list
@@ -228,7 +229,12 @@ local function flushEvents(t, now)
     for _, e in ipairs(t.pending) do
         if e:sub(1, 1) ~= "M" then urgent = true break end
     end
-    if not urgent and Net.tokens() < TOKEN_RESERVE and now - t.pendingSince < MOVE_BATCH_AGE then return end
+    if not urgent then
+        -- MOVEs never take the last token: a HIT/MISS/SERVE waiting a second for one is what the other side
+        -- feels as lag (and the MOVEs ride along with it anyway).
+        if Net.tokens() < URGENT_RESERVE + 1 then return end
+        if Net.tokens() < TOKEN_RESERVE and now - t.pendingSince < MOVE_BATCH_AGE then return end
+    end
     for _, body in ipairs(Codec.pack(t.pending, ROOM)) do
         local text = Net.msg("E", t.host, t.matchNo, me(), t.seq + 1, body)
         if not Net.trySend(text) then break end
