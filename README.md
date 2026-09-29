@@ -6,6 +6,8 @@ Type `/pong` to open the lobby.
 
 Made for **World of Warcraft: Forever** (Interface 16001).
 
+> **Early version:** everything is covered by automated tests outside the game, but WoW Pong hasn't been played in-game yet. Expect rough edges, especially in matches between players. Bug reports are welcome in [Issues](https://github.com/swirllyman/Wow-Pong/issues).
+
 ---
 
 ## How to play
